@@ -530,8 +530,8 @@
       state.hostPeerId='';
     }else{
       state.isHost=true;
-      state.hostPeerId=typeof data.hostPeerId==='string'&&data.hostPeerId?data.hostPeerId:makeHostPeerId();
       state.authorizedDevices.clear();
+
       if(Array.isArray(data.authorized)){
         for(const row of data.authorized){
           if(!row||typeof row!=='object')continue;
@@ -544,6 +544,18 @@
           });
         }
       }
+
+      if(state.authorizedDevices.size>0){
+        // Persistent room identity is meaningful only after at least one device has been trusted.
+        state.hostPeerId=typeof data.hostPeerId==='string'&&data.hostPeerId
+          ?data.hostPeerId
+          :makeHostPeerId();
+      }else{
+        // Brand-new / never-paired app: always start with a fresh host identity.
+        state.hostPeerId=makeHostPeerId();
+      }
+
+      persistCurrentRole();
     }
   }
 
@@ -688,6 +700,15 @@
     let count=0;
     for(const info of state.peers.values())if(info.accepted)count++;
     return count;
+  }
+
+  function hasTrustedPairing(){
+    if(state.isHost)return state.authorizedDevices.size>0;
+    return !!(state.resumeHostPeerId&&state.authSecret);
+  }
+
+  function isFreshUnpairedHost(){
+    return state.isHost&&state.authorizedDevices.size===0;
   }
 
   function connectionForDevice(deviceId){
@@ -841,10 +862,15 @@
       }
 
       const paired=1+authRows.length;
-      el.deviceSummary.textContent=`${paired} trusted device${paired===1?'':'s'} in this room`;
-      el.sendHint.textContent=acceptedPeerCount()>0
-        ?'Text will sync live to connected trusted devices.'
-        :'Paired devices will reconnect automatically when they are online.';
+      if(authRows.length===0){
+        el.deviceSummary.textContent='No paired devices yet';
+        el.sendHint.textContent='This is a fresh live session. Pair a device when you are ready.';
+      }else{
+        el.deviceSummary.textContent=`${paired} trusted device${paired===1?'':'s'} in this room`;
+        el.sendHint.textContent=acceptedPeerCount()>0
+          ?'Text will sync live to connected trusted devices.'
+          :'Trusted devices will reconnect automatically when they are online.';
+      }
     }else{
       const rows=Array.isArray(state.roster)?state.roster:[];
       for(const info of rows){
@@ -1571,6 +1597,11 @@
     clearInterval(state.heartbeatTimer);
     state.heartbeatTimer=setInterval(()=>{
       if(!state.isHost||state.ended)return;
+
+      if(isFreshUnpairedHost()&&state.peer?.open){
+        setStatus('ok','Live session ready');
+      }
+
       const now=Date.now();
 
       for(const [peerId,info] of state.peers){
@@ -1656,7 +1687,13 @@
       if(state.isHost){
         state.hostPeerId=id;
         persistCurrentRole();
-        setStatus('ok','Live session ready');
+
+        if(hasTrustedPairing()){
+          setStatus('ok','Trusted room ready');
+        }else{
+          setStatus('ok','Live session ready');
+        }
+
         el.pairBtn.style.display='';
         el.pairBtn.disabled=false;
         el.joinRoomBtn.style.display='';
@@ -1681,7 +1718,15 @@
 
     state.peer.on('disconnected',()=>{
       if(state.ended)return;
-      setStatus('','Reconnecting signaling…');
+
+      if(hasTrustedPairing()){
+        setStatus('','Reconnecting trusted room…');
+      }else{
+        // Fresh, never-paired room: this is only a transient signaling reconnect,
+        // not a device-pairing restore state.
+        setStatus('','Restoring live session…');
+      }
+
       try{state.peer.reconnect()}catch{}
     });
 
@@ -1689,12 +1734,27 @@
       const type=err?.type||'network';
 
       if(state.isHost&&type==='unavailable-id'&&!state.ended){
-        setStatus('','Restoring room identity…');
         clearTimeout(state.peerRetryTimer);
-        state.peerRetryTimer=setTimeout(()=>{
-          try{state.peer?.destroy()}catch{}
-          initPeer();
-        },1400);
+
+        if(hasTrustedPairing()){
+          setStatus('','Restoring trusted room…');
+          state.peerRetryTimer=setTimeout(()=>{
+            try{state.peer?.destroy()}catch{}
+            initPeer();
+          },1400);
+        }else{
+          // There is nothing to preserve yet. Rotate the unused host ID and start cleanly.
+          state.hostPeerId=makeHostPeerId();
+          persistCurrentRole();
+          setStatus('','Starting fresh session…');
+
+          state.peerRetryTimer=setTimeout(()=>{
+            try{state.peer?.destroy()}catch{}
+            state.peer=null;
+            state.myPeerId=null;
+            initPeer();
+          },350);
+        }
         return;
       }
 
