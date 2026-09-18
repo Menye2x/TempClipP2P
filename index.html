@@ -47,6 +47,8 @@
     .device{display:flex;gap:10px;align-items:center;justify-content:space-between;
       padding:12px;border:1px solid var(--border);background:var(--panel2);border-radius:12px}
     .device-name{font-weight:700}.live{font-size:.78rem;color:var(--ok)}
+    .device-name-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:12px}
+    .device-name-editor input{min-height:42px}
     .btns{display:flex;gap:9px;flex-wrap:wrap}
     .btn{min-height:42px;border-radius:10px;border:1px solid var(--border);background:var(--panel2);
       color:var(--text);padding:10px 14px;font-weight:700}
@@ -147,12 +149,21 @@
           </div>
         </div>
         <div class="card-b">
+          <div class="device-name-editor">
+            <label class="sr-only" for="deviceNameInput">Device name</label>
+            <input id="deviceNameInput" maxlength="40" placeholder="Device name">
+            <button class="btn" id="saveDeviceNameBtn" type="button">Rename</button>
+          </div>
+          <div class="tiny muted" style="margin:-4px 0 12px">
+            Custom device name is RAM-only and resets when this page is refreshed or closed.
+          </div>
+
           <div id="deviceList" class="device-list"></div>
 
           <div class="privacy small">
-            <b>RAM-only clipboard</b><br>
-            No clipboard text is written by this app to <code>localStorage</code>, IndexedDB, cookies,
-            or a database. Refresh/close destroys the local clipboard state.
+            <b>RAM-only session</b><br>
+            Clipboard text and the custom device nickname are not written by this app to <code>localStorage</code>,
+            IndexedDB, cookies, or a database. Refresh/close destroys the local session state.
           </div>
 
           <div class="btns section-gap">
@@ -347,6 +358,7 @@
     joinSpinner:$('joinSpinner'), joinCancelBtn:$('joinCancelBtn'), httpsNotice:$('httpsNotice'),
     statusDot:$('statusDot'), statusText:$('statusText'), deviceSummary:$('deviceSummary'),
     pairBtn:$('pairBtn'), joinRoomBtn:$('joinRoomBtn'), deviceList:$('deviceList'),
+    deviceNameInput:$('deviceNameInput'), saveDeviceNameBtn:$('saveDeviceNameBtn'),
     endBtn:$('endBtn'), refreshBtn:$('refreshBtn'), sendHint:$('sendHint'),
     composer:$('composer'), textInput:$('textInput'), charCount:$('charCount'),
     clearInputBtn:$('clearInputBtn'), sendBtn:$('sendBtn'), itemSummary:$('itemSummary'),
@@ -379,7 +391,8 @@
   const state = {
     peer:null, myPeerId:null, isHost:false, hostConn:null, accepted:false,
     peers:new Map(), items:[], pairToken:null, pairExpiresAt:0, pairTimer:null,
-    pairOpen:false, ended:false, deviceName:detectDeviceName(),
+    pairOpen:false, ended:false, platformName:detectDeviceName(),
+    deviceName:'',
     heartbeatTimer:null, hostMessageTimes:[],
     scannerStream:null, scannerFrame:null, scannerActive:false
   };
@@ -398,11 +411,21 @@
     return'Browser Device';
   }
 
+  function cleanDeviceName(value){
+    return String(value||'').replace(/[\u0000-\u001f\u007f]/g,'').trim().slice(0,40);
+  }
+
+  function makeDefaultDeviceName(platform){
+    const suffix=randomHex(2).toUpperCase();
+    return `${platform} ${suffix}`;
+  }
+
   function randomHex(bytes=24){
     const b=new Uint8Array(bytes); crypto.getRandomValues(b);
     return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
   }
   function uid(){return'clip_'+randomHex(12)}
+  state.deviceName=makeDefaultDeviceName(state.platformName);
   function setStatus(kind,text){
     el.statusDot.className='dot'+(kind==='ok'?' ok':kind==='bad'?' bad':'');
     el.statusText.textContent=text;
@@ -531,7 +554,7 @@
     const me=document.createElement('div'); me.className='device';
     const mine=document.createElement('div');
     const mineName=document.createElement('div'); mineName.className='device-name'; mineName.textContent=state.deviceName;
-    const mineSub=document.createElement('div'); mineSub.className='tiny muted'; mineSub.textContent='This device';
+    const mineSub=document.createElement('div'); mineSub.className='tiny muted'; mineSub.textContent=`This device · ${state.platformName}`;
     mine.append(mineName,mineSub);
     const live=document.createElement('div'); live.className='live'; live.textContent='● Live';
     me.append(mine,live); el.deviceList.append(me);
@@ -544,7 +567,7 @@
         const row=document.createElement('div'); row.className='device';
         const wrap=document.createElement('div');
         const n=document.createElement('div'); n.className='device-name'; n.textContent=info.name||'Linked device';
-        const s=document.createElement('div'); s.className='tiny muted'; s.textContent='Paired in this session';
+        const s=document.createElement('div'); s.className='tiny muted'; s.textContent=`${info.platform||'Unknown platform'} · Paired in this session`;
         wrap.append(n,s);
         const rm=document.createElement('button'); rm.type='button'; rm.className='mini'; rm.textContent='Remove';
         rm.addEventListener('click',()=>{
@@ -615,6 +638,7 @@
     const info={
       conn,
       name:'Pending device',
+      platform:'Unknown platform',
       accepted:false,
       messageTimes:[],
       lastSeen:Date.now(),
@@ -670,7 +694,8 @@
         clearTimeout(current.pendingTimer);
         current.pendingTimer=null;
         current.accepted=true;
-        current.name=typeof data.name==='string'?data.name.slice(0,80):'Linked device';
+        current.name=cleanDeviceName(data.name)||'Linked device';
+        current.platform=cleanDeviceName(data.platform)||'Unknown platform';
         state.peers.set(conn.peer,current);
         try{conn.send({type:'pair_accept',items:state.items.slice(0,LIMITS.MAX_ITEMS)})}catch{}
 
@@ -769,7 +794,7 @@
     },12000);
 
     conn.on('open',()=>{
-      try{conn.send({type:'pair_request',token,name:state.deviceName})}catch{}
+      try{conn.send({type:'pair_request',token,name:state.deviceName,platform:state.platformName})}catch{}
     });
     conn.on('data',data=>{
       if(!allowRate(state.hostMessageTimes)){
@@ -1108,6 +1133,29 @@
       if(!state.myPeerId)setStatus('bad',`Connection error: ${type}`);
     });
   }
+
+  el.deviceNameInput.value=state.deviceName;
+
+  function saveDeviceName(){
+    const next=cleanDeviceName(el.deviceNameInput.value);
+    if(!next){
+      el.deviceNameInput.value=state.deviceName;
+      toast('Device name cannot be empty.');
+      return;
+    }
+    state.deviceName=next;
+    el.deviceNameInput.value=next;
+    renderDevices();
+    toast('Device name updated for this session.');
+  }
+
+  el.saveDeviceNameBtn.addEventListener('click',saveDeviceName);
+  el.deviceNameInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      saveDeviceName();
+    }
+  });
 
   el.composer.addEventListener('submit',e=>{
     e.preventDefault(); if(state.ended)return;
