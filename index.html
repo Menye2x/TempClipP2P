@@ -9,6 +9,7 @@
   <!-- Free public libraries. No account/API key is required by this demo. -->
   <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 
   <style>
     :root{
@@ -84,6 +85,13 @@
     #qr img,#qr canvas{max-width:100%;height:auto}
     .count{font-size:2.5rem;font-weight:850;letter-spacing:-.04em;margin:7px 0}
     .pair-url{margin-top:10px;font-size:.78rem;color:var(--muted);word-break:break-all;max-height:70px;overflow:auto}
+    .scanner-box{position:relative;overflow:hidden;border:1px solid var(--border);border-radius:14px;background:#050912;aspect-ratio:4/3}
+    .scanner-box video{display:block;width:100%;height:100%;object-fit:cover;background:#050912}
+    .scanner-guide{position:absolute;inset:14%;border:2px solid rgba(255,255,255,.78);border-radius:16px;pointer-events:none}
+    .scanner-guide:before,.scanner-guide:after{content:"";position:absolute;width:34px;height:34px;border-color:var(--accent);border-style:solid}
+    .scanner-guide:before{left:-2px;top:-2px;border-width:4px 0 0 4px;border-radius:12px 0 0 0}
+    .scanner-guide:after{right:-2px;bottom:-2px;border-width:0 4px 4px 0;border-radius:0 0 12px 0}
+    .scanner-status{margin-top:12px;min-height:22px;color:var(--muted);font-size:.875rem;line-height:1.45}
     .toast{position:fixed;right:18px;bottom:18px;max-width:min(430px,calc(100vw - 36px));
       background:#111827;border:1px solid var(--border);box-shadow:var(--shadow);border-radius:12px;
       padding:12px 14px;transform:translateY(20px);opacity:0;pointer-events:none;transition:.2s ease;z-index:70}
@@ -133,7 +141,10 @@
             <h2>Linked devices</h2>
             <div class="small muted" id="deviceSummary">Preparing room…</div>
           </div>
-          <button class="btn primary" id="pairBtn" type="button" disabled>+ Add</button>
+          <div class="btns">
+            <button class="btn primary" id="pairBtn" type="button" disabled>+ Add</button>
+            <button class="btn" id="joinRoomBtn" type="button">Join Room</button>
+          </div>
         </div>
         <div class="card-b">
           <div id="deviceList" class="device-list"></div>
@@ -211,6 +222,35 @@
     <button class="btn" id="joinCancelBtn" type="button">Cancel</button>
   </section>
 
+  <div id="joinRoomModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="joinRoomTitle">
+    <div class="modal" style="max-width:620px">
+      <div class="modal-h">
+        <div>
+          <h2 id="joinRoomTitle">Join Room</h2>
+          <div class="small muted">Scan a Temporary Clipboard pairing QR.</div>
+        </div>
+        <button class="btn" id="closeJoinRoomBtn" type="button">Close</button>
+      </div>
+      <div class="modal-b">
+        <div class="scanner-box">
+          <video id="qrScannerVideo" playsinline muted aria-label="QR scanner camera preview"></video>
+          <div class="scanner-guide" aria-hidden="true"></div>
+        </div>
+        <canvas id="qrScannerCanvas" hidden></canvas>
+        <div id="qrScannerStatus" class="scanner-status" aria-live="polite">
+          Camera has not started yet.
+        </div>
+        <div class="btns section-gap">
+          <button class="btn primary" id="startScannerBtn" type="button">Allow Camera & Scan</button>
+          <button class="btn" id="retryScannerBtn" type="button" hidden>Try Again</button>
+        </div>
+        <div class="tiny muted section-gap">
+          Camera permission is used only for live QR scanning. Audio is never requested. The video stream is not uploaded or stored by this app.
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="pairModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="pairTitle">
     <div class="modal">
       <div class="modal-h">
@@ -287,10 +327,15 @@
     mainApp:$('mainApp'), joinScreen:$('joinScreen'), joinMessage:$('joinMessage'),
     joinSpinner:$('joinSpinner'), joinCancelBtn:$('joinCancelBtn'), httpsNotice:$('httpsNotice'),
     statusDot:$('statusDot'), statusText:$('statusText'), deviceSummary:$('deviceSummary'),
-    pairBtn:$('pairBtn'), deviceList:$('deviceList'), endBtn:$('endBtn'), refreshBtn:$('refreshBtn'), sendHint:$('sendHint'),
+    pairBtn:$('pairBtn'), joinRoomBtn:$('joinRoomBtn'), deviceList:$('deviceList'),
+    endBtn:$('endBtn'), refreshBtn:$('refreshBtn'), sendHint:$('sendHint'),
     composer:$('composer'), textInput:$('textInput'), charCount:$('charCount'),
     clearInputBtn:$('clearInputBtn'), sendBtn:$('sendBtn'), itemSummary:$('itemSummary'),
     clearAllBtn:$('clearAllBtn'), emptyState:$('emptyState'), clipList:$('clipList'),
+    joinRoomModal:$('joinRoomModal'), closeJoinRoomBtn:$('closeJoinRoomBtn'),
+    qrScannerVideo:$('qrScannerVideo'), qrScannerCanvas:$('qrScannerCanvas'),
+    qrScannerStatus:$('qrScannerStatus'), startScannerBtn:$('startScannerBtn'),
+    retryScannerBtn:$('retryScannerBtn'),
     pairModal:$('pairModal'), closePairBtn:$('closePairBtn'), qr:$('qr'),
     countdown:$('countdown'), pairState:$('pairState'), regenBtn:$('regenBtn'),
     pairUrl:$('pairUrl'), refreshSuccessModal:$('refreshSuccessModal'),
@@ -315,7 +360,8 @@
     peer:null, myPeerId:null, isHost:false, hostConn:null, accepted:false,
     peers:new Map(), items:[], pairToken:null, pairExpiresAt:0, pairTimer:null,
     pairOpen:false, ended:false, deviceName:detectDeviceName(),
-    heartbeatTimer:null, hostMessageTimes:[]
+    heartbeatTimer:null, hostMessageTimes:[],
+    scannerStream:null, scannerFrame:null, scannerActive:false
   };
 
   if (location.protocol === 'file:') el.httpsNotice.classList.add('show');
@@ -370,6 +416,23 @@
       if(obj.host.length<1||obj.host.length>128)return null;
       if(!/^[0-9a-f]{48}$/i.test(obj.token))return null;
       return obj;
+    }catch{return null}
+  }
+
+  function parsePairingUrl(value){
+    try{
+      const url=new URL(String(value).trim(),location.href);
+      if(url.origin!==location.origin)return null;
+      const prefix=location.pathname.replace(/index\.html$/,'');
+      const scannedPath=url.pathname.replace(/index\.html$/,'');
+      if(scannedPath!==prefix)return null;
+      if(!url.hash.startsWith('#pair='))return null;
+      const raw=url.hash.slice(6);
+      const obj=JSON.parse(decodeURIComponent(escape(atob(raw))));
+      if(!obj||typeof obj.host!=='string'||typeof obj.token!=='string')return null;
+      if(obj.host.length<1||obj.host.length>128)return null;
+      if(!/^[0-9a-f]{48}$/i.test(obj.token))return null;
+      return {url:url.toString(),pair:obj};
     }catch{return null}
   }
 
@@ -644,6 +707,7 @@
       el.joinScreen.classList.remove('show');
       el.mainApp.style.display='';
       el.pairBtn.style.display='none';
+      el.joinRoomBtn.style.display='none';
       setStatus('ok','Connected');
       renderDevices();
       renderItems();
@@ -714,6 +778,150 @@
     });
   }
 
+  function stopScanner(){
+    state.scannerActive=false;
+    if(state.scannerFrame){
+      cancelAnimationFrame(state.scannerFrame);
+      state.scannerFrame=null;
+    }
+    if(state.scannerStream){
+      for(const track of state.scannerStream.getTracks()){
+        try{track.stop()}catch{}
+      }
+      state.scannerStream=null;
+    }
+    try{
+      el.qrScannerVideo.pause();
+      el.qrScannerVideo.srcObject=null;
+    }catch{}
+  }
+
+  function closeJoinRoom(){
+    stopScanner();
+    el.joinRoomModal.classList.remove('show');
+    el.qrScannerStatus.textContent='Camera has not started yet.';
+    el.startScannerBtn.hidden=false;
+    el.retryScannerBtn.hidden=true;
+  }
+
+  function acceptScannedQr(value){
+    const parsed=parsePairingUrl(value);
+    if(!parsed){
+      el.qrScannerStatus.textContent='QR detected, but it is not a valid Temporary Clipboard pairing QR.';
+      return false;
+    }
+    el.qrScannerStatus.textContent='Valid pairing QR detected. Joining room…';
+    stopScanner();
+    setTimeout(()=>{location.href=parsed.url},180);
+    return true;
+  }
+
+  async function scanWithBarcodeDetector(){
+    if(!('BarcodeDetector' in window))return false;
+    let supported=[];
+    try{supported=await BarcodeDetector.getSupportedFormats()}catch{return false}
+    if(!supported.includes('qr_code'))return false;
+    const detector=new BarcodeDetector({formats:['qr_code']});
+
+    const loop=async()=>{
+      if(!state.scannerActive)return;
+      try{
+        if(el.qrScannerVideo.readyState>=2){
+          const codes=await detector.detect(el.qrScannerVideo);
+          if(codes&&codes.length&&codes[0].rawValue){
+            if(acceptScannedQr(codes[0].rawValue))return;
+          }
+        }
+      }catch{}
+      state.scannerFrame=requestAnimationFrame(loop);
+    };
+    state.scannerFrame=requestAnimationFrame(loop);
+    return true;
+  }
+
+  function scanWithJsQr(){
+    if(typeof jsQR!=='function')return false;
+    const canvas=el.qrScannerCanvas;
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+
+    const loop=()=>{
+      if(!state.scannerActive)return;
+      try{
+        const video=el.qrScannerVideo;
+        if(video.readyState>=2&&video.videoWidth&&video.videoHeight){
+          const maxWidth=720;
+          const scale=Math.min(1,maxWidth/video.videoWidth);
+          canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
+          canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+          ctx.drawImage(video,0,0,canvas.width,canvas.height);
+          const frame=ctx.getImageData(0,0,canvas.width,canvas.height);
+          const result=jsQR(frame.data,frame.width,frame.height,{inversionAttempts:'dontInvert'});
+          if(result?.data&&acceptScannedQr(result.data))return;
+        }
+      }catch{}
+      state.scannerFrame=requestAnimationFrame(loop);
+    };
+    state.scannerFrame=requestAnimationFrame(loop);
+    return true;
+  }
+
+  async function startScanner(){
+    stopScanner();
+    el.retryScannerBtn.hidden=true;
+    el.startScannerBtn.hidden=true;
+
+    if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia){
+      el.qrScannerStatus.textContent='Camera scanning requires HTTPS (or localhost) and a browser with camera access.';
+      el.retryScannerBtn.hidden=false;
+      return;
+    }
+
+    el.qrScannerStatus.textContent='Requesting camera permission…';
+
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({
+        video:{facingMode:{ideal:'environment'}},
+        audio:false
+      });
+      state.scannerStream=stream;
+      state.scannerActive=true;
+      el.qrScannerVideo.srcObject=stream;
+      await el.qrScannerVideo.play();
+      el.qrScannerStatus.textContent='Camera ready. Point it at a pairing QR.';
+
+      const nativeStarted=await scanWithBarcodeDetector();
+      if(!nativeStarted){
+        const fallbackStarted=scanWithJsQr();
+        if(!fallbackStarted){
+          stopScanner();
+          el.qrScannerStatus.textContent='QR scanner support is unavailable in this browser.';
+          el.retryScannerBtn.hidden=false;
+        }
+      }
+    }catch(err){
+      stopScanner();
+      const name=err?.name||'CameraError';
+      if(name==='NotAllowedError'){
+        el.qrScannerStatus.textContent='Camera permission was denied. Allow camera access in the browser, then try again.';
+      }else if(name==='NotFoundError'){
+        el.qrScannerStatus.textContent='No camera was found on this device.';
+      }else if(name==='NotReadableError'){
+        el.qrScannerStatus.textContent='The camera is busy or unavailable to this browser.';
+      }else{
+        el.qrScannerStatus.textContent=`Could not start camera (${name}).`;
+      }
+      el.retryScannerBtn.hidden=false;
+    }
+  }
+
+  function openJoinRoom(){
+    if(state.ended)return;
+    el.joinRoomModal.classList.add('show');
+    el.qrScannerStatus.textContent='Camera has not started yet.';
+    el.startScannerBtn.hidden=false;
+    el.retryScannerBtn.hidden=true;
+  }
+
   function renderQr(url){
     el.qr.innerHTML=''; el.pairUrl.textContent=url;
     if(typeof QRCode==='undefined'){
@@ -759,6 +967,7 @@
   function endSession(){
     if(state.ended)return;
     state.ended=true; closePair();
+    closeJoinRoom();
     clearInterval(state.heartbeatTimer);
     state.heartbeatTimer=null;
     if(state.isHost){
@@ -769,7 +978,8 @@
     clearAll(false);
     try{state.peer?.destroy()}catch{}
     state.peer=null; state.accepted=false;
-    el.sendBtn.disabled=true; el.textInput.disabled=true; el.pairBtn.disabled=true; el.clearAllBtn.disabled=true;
+    el.sendBtn.disabled=true; el.textInput.disabled=true; el.pairBtn.disabled=true;
+    el.joinRoomBtn.disabled=true; el.clearAllBtn.disabled=true;
     setStatus('bad','Session ended'); renderDevices();
     toast('Session ended. Temporary text cleared.');
   }
@@ -847,6 +1057,11 @@
   });
   el.clearAllBtn.addEventListener('click',()=>{clearAll(true);toast('Clipboard cleared.')});
   el.pairBtn.addEventListener('click',openPair);
+  el.joinRoomBtn.addEventListener('click',openJoinRoom);
+  el.closeJoinRoomBtn.addEventListener('click',closeJoinRoom);
+  el.startScannerBtn.addEventListener('click',startScanner);
+  el.retryScannerBtn.addEventListener('click',startScanner);
+  el.joinRoomModal.addEventListener('click',e=>{if(e.target===el.joinRoomModal)closeJoinRoom()});
   el.closePairBtn.addEventListener('click',closePair);
   el.regenBtn.addEventListener('click',()=>{regeneratePairToken();el.pairState.textContent='Fresh QR generated.'});
   function openEndConfirm(){
@@ -886,6 +1101,7 @@
       WebRTC connection closes.
   */
   window.addEventListener('pagehide',()=>{
+    stopScanner();
     clearInterval(state.heartbeatTimer);
     state.heartbeatTimer=null;
     try{
