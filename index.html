@@ -47,8 +47,13 @@
     .device{display:flex;gap:10px;align-items:center;justify-content:space-between;
       padding:12px;border:1px solid var(--border);background:var(--panel2);border-radius:12px}
     .device-name{font-weight:700}.live{font-size:.78rem;color:var(--ok)}
-    .device-name-editor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-bottom:12px}
-    .device-name-editor input{min-height:42px}
+    .device-name-editor{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;align-items:stretch}
+    .device-name-label{display:block;font-size:.9rem;font-weight:700;color:var(--text)}
+    .device-name-editor input{width:100%;min-width:0;min-height:40px}
+    .rename-btn{align-self:flex-start;width:auto;min-width:84px;min-height:40px;padding:7px 12px;font-size:.72rem;
+      line-height:1;white-space:nowrap;overflow:visible;text-overflow:clip;color:var(--ok);
+      border-color:rgba(74,222,128,.45);background:rgba(74,222,128,.08)}
+    .rename-btn:hover{background:rgba(74,222,128,.14);color:#b9f6cb}
     .btns{display:flex;gap:9px;flex-wrap:wrap}
     .btn{min-height:42px;border-radius:10px;border:1px solid var(--border);background:var(--panel2);
       color:var(--text);padding:10px 14px;font-weight:700}
@@ -150,20 +155,21 @@
         </div>
         <div class="card-b">
           <div class="device-name-editor">
-            <label class="sr-only" for="deviceNameInput">Device name</label>
+            <label class="device-name-label" for="deviceNameInput">Device Name</label>
             <input id="deviceNameInput" maxlength="40" placeholder="Device name">
-            <button class="btn" id="saveDeviceNameBtn" type="button">Rename</button>
+            <button class="btn rename-btn" id="saveDeviceNameBtn" type="button">Rename</button>
           </div>
           <div class="tiny muted" style="margin:-4px 0 12px">
-            Custom device name is RAM-only and resets when this page is refreshed or closed.
+            Device name and pairing trust are stored locally so linked devices can reconnect after refresh.
           </div>
 
           <div id="deviceList" class="device-list"></div>
 
           <div class="privacy small">
-            <b>RAM-only session</b><br>
-            Clipboard text and the custom device nickname are not written by this app to <code>localStorage</code>,
-            IndexedDB, cookies, or a database. Refresh/close destroys the local session state.
+            <b>RAM-only clipboard</b><br>
+            Clipboard text is never stored in <code>localStorage</code>, IndexedDB, cookies, or a database.
+            Only pairing credentials and the device nickname are stored locally so trusted devices can reconnect.
+            If every paired device closes, clipboard text is gone.
           </div>
 
           <div class="btns section-gap">
@@ -312,12 +318,12 @@
       <div class="modal-h">
         <div>
           <h2 id="refreshSuccessTitle">Successfully Refreshed</h2>
-          <div class="small muted">The session has been refreshed successfully.</div>
+          <div class="small muted">The app has been refreshed and the trusted-device relationship is preserved.</div>
         </div>
       </div>
       <div class="modal-b">
         <div class="small muted" style="line-height:1.55">
-          The previous RAM-only clipboard state has been cleared. This message is for acknowledgement only.
+          The live connection will restore automatically. Clipboard text remains RAM-only and can be re-synced from another paired device that stayed online.
         </div>
         <div class="btns section-gap" style="justify-content:flex-end">
           <button class="btn primary" id="refreshSuccessOkBtn" type="button">Acknowledge</button>
@@ -331,12 +337,12 @@
       <div class="modal-h">
         <div>
           <h2 id="endConfirmTitle">End this session?</h2>
-          <div class="small muted">This will disconnect linked devices and clear all temporary clipboard text.</div>
+          <div class="small muted">This will disconnect linked devices, clear temporary clipboard text, and revoke the current pairing relationship.</div>
         </div>
       </div>
       <div class="modal-b">
         <div class="small muted" style="line-height:1.55">
-          Because this app stores clipboard content only in browser RAM, ending the session cannot be undone.
+          Clipboard text is RAM-only. Ending the session also removes the trusted-device authorization, so pairing must be performed again later.
         </div>
         <div class="btns section-gap" style="justify-content:flex-end">
           <button class="btn" id="cancelEndBtn" type="button">Cancel</button>
@@ -385,19 +391,46 @@
     MESSAGE_WINDOW_MS: 5000,
     MAX_MESSAGES_PER_WINDOW: 30,
     HEARTBEAT_MS: 10000,
-    PEER_STALE_MS: 35000
+    PEER_STALE_MS: 35000,
+    RECONNECT_MS: 1800
   });
 
+  const PERSIST_KEY='tempclip.pairing.v3';
+
   const state = {
-    peer:null, myPeerId:null, isHost:false, hostConn:null, accepted:false,
-    peers:new Map(), items:[], pairToken:null, pairExpiresAt:0, pairTimer:null,
-    pairOpen:false, ended:false, platformName:detectDeviceName(),
+    peer:null,
+    myPeerId:null,
+    isHost:false,
+    hostConn:null,
+    accepted:false,
+    peers:new Map(),
+    authorizedDevices:new Map(),
+    roster:[],
+    items:[],
+    pairToken:null,
+    pairExpiresAt:0,
+    pairTimer:null,
+    pairOpen:false,
+    ended:false,
+    platformName:detectDeviceName(),
     deviceName:'',
-    heartbeatTimer:null, hostMessageTimes:[],
-    scannerStream:null, scannerFrame:null, scannerActive:false
+    deviceId:'',
+    hostPeerId:'',
+    resumeHostPeerId:'',
+    authSecret:'',
+    heartbeatTimer:null,
+    reconnectTimer:null,
+    peerRetryTimer:null,
+    hostMessageTimes:[],
+    scannerStream:null,
+    scannerFrame:null,
+    scannerActive:false,
+    joinMode:null,
+    persistenceAvailable:true,
+    explicitPair:null
   };
 
-  if (location.protocol === 'file:') el.httpsNotice.classList.add('show');
+  if(location.protocol==='file:')el.httpsNotice.classList.add('show');
 
   function detectDeviceName(){
     const ua=navigator.userAgent||'';
@@ -415,51 +448,159 @@
     return String(value||'').replace(/[\u0000-\u001f\u007f]/g,'').trim().slice(0,40);
   }
 
-  function makeDefaultDeviceName(platform){
-    const suffix=randomHex(2).toUpperCase();
-    return `${platform} ${suffix}`;
-  }
-
   function randomHex(bytes=24){
-    const b=new Uint8Array(bytes); crypto.getRandomValues(b);
+    const b=new Uint8Array(bytes);
+    crypto.getRandomValues(b);
     return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
   }
+
   function uid(){return'clip_'+randomHex(12)}
-  state.deviceName=makeDefaultDeviceName(state.platformName);
+  function makeDefaultDeviceName(platform){return`${platform} ${randomHex(2).toUpperCase()}`}
+  function makeDeviceId(){return'dev_'+randomHex(12)}
+  function makeHostPeerId(){return'tempclip-'+randomHex(16)}
+
   function setStatus(kind,text){
     el.statusDot.className='dot'+(kind==='ok'?' ok':kind==='bad'?' bad':'');
     el.statusText.textContent=text;
   }
+
   let toastTimer;
   function toast(msg){
-    clearTimeout(toastTimer); el.toast.textContent=msg; el.toast.classList.add('show');
+    clearTimeout(toastTimer);
+    el.toast.textContent=msg;
+    el.toast.classList.add('show');
     toastTimer=setTimeout(()=>el.toast.classList.remove('show'),2200);
   }
+
   function fmt(ts){return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
   function cleanBaseUrl(){return location.href.split('#')[0]}
+
   function baseWithoutRefreshMarker(){
     const url=new URL(cleanBaseUrl());
     url.searchParams.delete('refreshed');
     return url.toString();
   }
+
   function wasRefreshed(){
     try{return new URL(location.href).searchParams.get('refreshed')==='1'}catch{return false}
+  }
+
+  function safeLocalGet(){
+    try{return localStorage.getItem(PERSIST_KEY)}catch{
+      state.persistenceAvailable=false;
+      return null;
+    }
+  }
+
+  function safeLocalSet(value){
+    try{
+      localStorage.setItem(PERSIST_KEY,value);
+      state.persistenceAvailable=true;
+      return true;
+    }catch{
+      state.persistenceAvailable=false;
+      return false;
+    }
+  }
+
+  function loadPersistent(){
+    let data=null;
+    const raw=safeLocalGet();
+    if(raw){
+      try{data=JSON.parse(raw)}catch{}
+    }
+
+    if(!data||data.version!==3){
+      state.deviceId=makeDeviceId();
+      state.deviceName=makeDefaultDeviceName(state.platformName);
+      state.isHost=true;
+      state.hostPeerId=makeHostPeerId();
+      state.authorizedDevices.clear();
+      persistCurrentRole();
+      return;
+    }
+
+    state.deviceId=typeof data.deviceId==='string'&&data.deviceId?data.deviceId:makeDeviceId();
+    state.deviceName=cleanDeviceName(data.deviceName)||makeDefaultDeviceName(state.platformName);
+
+    if(data.role==='guest'&&typeof data.hostPeerId==='string'&&typeof data.authSecret==='string'){
+      state.isHost=false;
+      state.resumeHostPeerId=data.hostPeerId;
+      state.authSecret=data.authSecret;
+      state.hostPeerId='';
+    }else{
+      state.isHost=true;
+      state.hostPeerId=typeof data.hostPeerId==='string'&&data.hostPeerId?data.hostPeerId:makeHostPeerId();
+      state.authorizedDevices.clear();
+      if(Array.isArray(data.authorized)){
+        for(const row of data.authorized){
+          if(!row||typeof row!=='object')continue;
+          if(typeof row.deviceId!=='string'||typeof row.secret!=='string')continue;
+          state.authorizedDevices.set(row.deviceId,{
+            deviceId:row.deviceId,
+            secret:row.secret,
+            name:cleanDeviceName(row.name)||'Linked device',
+            platform:cleanDeviceName(row.platform)||'Unknown platform'
+          });
+        }
+      }
+    }
+  }
+
+  function persistCurrentRole(){
+    const common={
+      version:3,
+      deviceId:state.deviceId,
+      deviceName:state.deviceName,
+      platform:state.platformName
+    };
+
+    if(state.isHost){
+      common.role='host';
+      common.hostPeerId=state.hostPeerId||makeHostPeerId();
+      state.hostPeerId=common.hostPeerId;
+      common.authorized=Array.from(state.authorizedDevices.values()).map(row=>({
+        deviceId:row.deviceId,
+        secret:row.secret,
+        name:row.name,
+        platform:row.platform
+      }));
+    }else{
+      common.role='guest';
+      common.hostPeerId=state.resumeHostPeerId;
+      common.authSecret=state.authSecret;
+    }
+    safeLocalSet(JSON.stringify(common));
+  }
+
+  function prepareFreshHostPersistence(){
+    state.isHost=true;
+    state.hostPeerId=makeHostPeerId();
+    state.resumeHostPeerId='';
+    state.authSecret='';
+    state.authorizedDevices.clear();
+    state.roster=[];
+    persistCurrentRole();
   }
 
   function encodePair(host,token){
     const s=JSON.stringify({host,token});
     return btoa(unescape(encodeURIComponent(s)));
   }
-  function decodePair(){
-    if(!location.hash.startsWith('#pair='))return null;
+
+  function parsePairPayload(raw){
     try{
-      const raw=location.hash.slice(6);
       const obj=JSON.parse(decodeURIComponent(escape(atob(raw))));
       if(!obj||typeof obj.host!=='string'||typeof obj.token!=='string')return null;
       if(obj.host.length<1||obj.host.length>128)return null;
       if(!/^[0-9a-f]{48}$/i.test(obj.token))return null;
       return obj;
     }catch{return null}
+  }
+
+  function decodePair(){
+    if(!location.hash.startsWith('#pair='))return null;
+    return parsePairPayload(location.hash.slice(6));
   }
 
   function parsePairingUrl(value){
@@ -470,26 +611,29 @@
       const scannedPath=url.pathname.replace(/index\.html$/,'');
       if(scannedPath!==prefix)return null;
       if(!url.hash.startsWith('#pair='))return null;
-      const raw=url.hash.slice(6);
-      const obj=JSON.parse(decodeURIComponent(escape(atob(raw))));
-      if(!obj||typeof obj.host!=='string'||typeof obj.token!=='string')return null;
-      if(obj.host.length<1||obj.host.length>128)return null;
-      if(!/^[0-9a-f]{48}$/i.test(obj.token))return null;
-      return {url:url.toString(),pair:obj};
+      const pair=parsePairPayload(url.hash.slice(6));
+      return pair?{url:url.toString(),pair}:null;
     }catch{return null}
   }
 
   async function copyText(text){
     try{
       if(navigator.clipboard&&window.isSecureContext){
-        await navigator.clipboard.writeText(text); return true;
+        await navigator.clipboard.writeText(text);
+        return true;
       }
     }catch{}
     try{
       const ta=document.createElement('textarea');
-      ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
-      document.body.appendChild(ta); ta.focus(); ta.select();
-      const ok=document.execCommand('copy'); ta.remove(); return ok;
+      ta.value=text;
+      ta.style.position='fixed';
+      ta.style.opacity='0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok=document.execCommand('copy');
+      ta.remove();
+      return ok;
     }catch{return false}
   }
 
@@ -503,8 +647,24 @@
     if(byteLength(raw.text)>LIMITS.MAX_TOTAL_BYTES)return null;
     const ts=Number(raw.ts);
     if(!Number.isFinite(ts)||ts<0)return null;
-    const from=typeof raw.from==='string'?raw.from.slice(0,80):'Device';
-    return {id:raw.id,text:raw.text,ts,from};
+    const from=cleanDeviceName(raw.from)||'Device';
+    return{id:raw.id,text:raw.text,ts,from};
+  }
+
+  function sanitizeSnapshot(rawItems){
+    if(!Array.isArray(rawItems))return[];
+    const out=[];
+    let total=0;
+    for(const raw of rawItems.slice(0,LIMITS.MAX_ITEMS)){
+      const item=sanitizeItem(raw);
+      if(!item)continue;
+      const size=byteLength(item.text);
+      if(total+size>LIMITS.MAX_TOTAL_BYTES)break;
+      if(out.some(x=>x.id===item.id))continue;
+      out.push(item);
+      total+=size;
+    }
+    return out;
   }
 
   function canStoreItem(item){
@@ -521,7 +681,7 @@
   }
 
   function safeMessage(data){
-    return !!data&&typeof data==='object'&&!Array.isArray(data)&&typeof data.type==='string'&&data.type.length<=32;
+    return!!data&&typeof data==='object'&&!Array.isArray(data)&&typeof data.type==='string'&&data.type.length<=32;
   }
 
   function acceptedPeerCount(){
@@ -530,72 +690,194 @@
     return count;
   }
 
+  function connectionForDevice(deviceId){
+    for(const info of state.peers.values()){
+      if(info.accepted&&info.deviceId===deviceId)return info;
+    }
+    return null;
+  }
+
   function renderItems(){
     el.itemSummary.textContent=`${state.items.length} item${state.items.length===1?'':'s'}`;
     el.emptyState.style.display=state.items.length?'none':'block';
     el.clipList.innerHTML='';
+
     for(const item of state.items){
-      const card=document.createElement('article'); card.className='clip';
-      const meta=document.createElement('div'); meta.className='clip-meta';
-      const left=document.createElement('div'); left.className='small muted';
+      const card=document.createElement('article');
+      card.className='clip';
+
+      const meta=document.createElement('div');
+      meta.className='clip-meta';
+
+      const left=document.createElement('div');
+      left.className='small muted';
       left.textContent=`${item.from||'Device'} · ${fmt(item.ts||Date.now())}`;
-      const actions=document.createElement('div'); actions.className='clip-actions';
-      const cp=document.createElement('button'); cp.type='button'; cp.className='mini'; cp.textContent='Copy';
+
+      const actions=document.createElement('div');
+      actions.className='clip-actions';
+
+      const cp=document.createElement('button');
+      cp.type='button';
+      cp.className='mini';
+      cp.textContent='Copy';
       cp.addEventListener('click',async()=>toast(await copyText(item.text)?'Copied.':'Copy manually.'));
-      const del=document.createElement('button'); del.type='button'; del.className='mini'; del.textContent='Delete';
+
+      const del=document.createElement('button');
+      del.type='button';
+      del.className='mini';
+      del.textContent='Delete';
       del.addEventListener('click',()=>deleteItem(item.id,true));
-      const p=document.createElement('p'); p.className='clip-text'; p.textContent=item.text;
-      actions.append(cp,del); meta.append(left,actions); card.append(meta,p); el.clipList.append(card);
+
+      const p=document.createElement('p');
+      p.className='clip-text';
+      p.textContent=item.text;
+
+      actions.append(cp,del);
+      meta.append(left,actions);
+      card.append(meta,p);
+      el.clipList.append(card);
     }
   }
 
-  function renderDevices(){
-    el.deviceList.innerHTML='';
-    const me=document.createElement('div'); me.className='device';
-    const mine=document.createElement('div');
-    const mineName=document.createElement('div'); mineName.className='device-name'; mineName.textContent=state.deviceName;
-    const mineSub=document.createElement('div'); mineSub.className='tiny muted'; mineSub.textContent=`This device · ${state.platformName}`;
-    mine.append(mineName,mineSub);
-    const live=document.createElement('div'); live.className='live'; live.textContent='● Live';
-    me.append(mine,live); el.deviceList.append(me);
+  function buildRoster(){
+    if(!state.isHost)return state.roster;
+    const rows=[{
+      deviceId:state.deviceId,
+      name:state.deviceName,
+      platform:state.platformName,
+      isHost:true,
+      connected:true
+    }];
 
-    if(state.isHost){
-      let count=1;
-      for(const [peerId,info] of state.peers){
-        if(!info.accepted)continue;
-        count++;
-        const row=document.createElement('div'); row.className='device';
-        const wrap=document.createElement('div');
-        const n=document.createElement('div'); n.className='device-name'; n.textContent=info.name||'Linked device';
-        const s=document.createElement('div'); s.className='tiny muted'; s.textContent=`${info.platform||'Unknown platform'} · Paired in this session`;
-        wrap.append(n,s);
-        const rm=document.createElement('button'); rm.type='button'; rm.className='mini'; rm.textContent='Remove';
-        rm.addEventListener('click',()=>{
-          try{info.conn.send({type:'removed'})}catch{}
-          try{info.conn.close()}catch{}
-          state.peers.delete(peerId); renderDevices(); toast('Device removed.');
-        });
-        row.append(wrap,rm); el.deviceList.append(row);
-      }
-      el.deviceSummary.textContent=`${count} device${count===1?'':'s'} in this live room`;
-      el.sendHint.textContent=count>1?'Text will sync live to linked devices.':'Pair another device, or use this clipboard locally.';
-    }else{
-      if(state.accepted){
-        const row=document.createElement('div'); row.className='device';
-        row.innerHTML='<div><div class="device-name">Session Host</div><div class="tiny muted">Connected peer</div></div><div class="live">● Live</div>';
-        el.deviceList.append(row);
-        el.deviceSummary.textContent='Connected to live room';
-        el.sendHint.textContent='Text will sync live through the room host.';
-      }else{
-        el.deviceSummary.textContent='Joining room…';
-      }
+    for(const auth of state.authorizedDevices.values()){
+      rows.push({
+        deviceId:auth.deviceId,
+        name:auth.name,
+        platform:auth.platform,
+        isHost:false,
+        connected:!!connectionForDevice(auth.deviceId)
+      });
     }
+    return rows;
   }
 
   function broadcast(data,exclude=null){
     for(const [peerId,info] of state.peers){
       if(!info.accepted||peerId===exclude||!info.conn.open)continue;
       try{info.conn.send(data)}catch{}
+    }
+  }
+
+  function broadcastRoster(){
+    if(!state.isHost)return;
+    const roster=buildRoster();
+    state.roster=roster;
+    broadcast({type:'room_roster',roster});
+    renderDevices();
+  }
+
+  function removeAuthorizedDevice(deviceId,notify=true){
+    const auth=state.authorizedDevices.get(deviceId);
+    if(!auth)return;
+    const online=connectionForDevice(deviceId);
+
+    state.authorizedDevices.delete(deviceId);
+    persistCurrentRole();
+
+    if(online){
+      if(notify){
+        try{online.conn.send({type:'removed'})}catch{}
+      }
+      try{online.conn.close()}catch{}
+      state.peers.delete(online.conn.peer);
+    }
+
+    broadcastRoster();
+    toast(`${auth.name||'Device'} removed.`);
+  }
+
+  function renderDevices(){
+    el.deviceList.innerHTML='';
+
+    const me=document.createElement('div');
+    me.className='device';
+    const mine=document.createElement('div');
+    const mineName=document.createElement('div');
+    mineName.className='device-name';
+    mineName.textContent=state.deviceName;
+    const mineSub=document.createElement('div');
+    mineSub.className='tiny muted';
+    mineSub.textContent=`This device · ${state.platformName}`;
+    mine.append(mineName,mineSub);
+    const live=document.createElement('div');
+    live.className='live';
+    live.textContent='● Live';
+    me.append(mine,live);
+    el.deviceList.append(me);
+
+    if(state.isHost){
+      const authRows=Array.from(state.authorizedDevices.values());
+      for(const auth of authRows){
+        const online=connectionForDevice(auth.deviceId);
+        const row=document.createElement('div');
+        row.className='device';
+        const wrap=document.createElement('div');
+        const n=document.createElement('div');
+        n.className='device-name';
+        n.textContent=auth.name||'Linked device';
+        const s=document.createElement('div');
+        s.className='tiny muted';
+        s.textContent=`${auth.platform||'Unknown platform'} · ${online?'Connected':'Paired · offline'}`;
+        wrap.append(n,s);
+
+        const rm=document.createElement('button');
+        rm.type='button';
+        rm.className='mini';
+        rm.textContent='Remove';
+        rm.addEventListener('click',()=>removeAuthorizedDevice(auth.deviceId,true));
+
+        row.append(wrap,rm);
+        el.deviceList.append(row);
+      }
+
+      const paired=1+authRows.length;
+      el.deviceSummary.textContent=`${paired} trusted device${paired===1?'':'s'} in this room`;
+      el.sendHint.textContent=acceptedPeerCount()>0
+        ?'Text will sync live to connected trusted devices.'
+        :'Paired devices will reconnect automatically when they are online.';
+    }else{
+      const rows=Array.isArray(state.roster)?state.roster:[];
+      for(const info of rows){
+        if(!info||info.deviceId===state.deviceId)continue;
+        const row=document.createElement('div');
+        row.className='device';
+
+        const wrap=document.createElement('div');
+        const n=document.createElement('div');
+        n.className='device-name';
+        n.textContent=cleanDeviceName(info.name)||(info.isHost?'Session Host':'Linked device');
+        const s=document.createElement('div');
+        s.className='tiny muted';
+        s.textContent=`${cleanDeviceName(info.platform)||'Unknown platform'} · ${info.connected?'Connected':'Paired · offline'}${info.isHost?' · Host':''}`;
+        wrap.append(n,s);
+
+        const status=document.createElement('div');
+        status.className=info.connected?'live':'tiny muted';
+        status.textContent=info.connected?'● Live':'Offline';
+
+        row.append(wrap,status);
+        el.deviceList.append(row);
+      }
+
+      if(state.accepted){
+        el.deviceSummary.textContent='Trusted room connected';
+        el.sendHint.textContent='Text can be sent in either direction.';
+      }else if(state.resumeHostPeerId){
+        el.deviceSummary.textContent='Trusted room · reconnecting';
+        el.sendHint.textContent='Pairing is preserved. Reconnecting automatically…';
+      }else{
+        el.deviceSummary.textContent='Not joined to another room';
+      }
     }
   }
 
@@ -606,6 +888,7 @@
     if(!canStoreItem(item))return false;
     state.items.unshift(item);
     renderItems();
+
     if(broadcastIt){
       if(state.isHost)broadcast({type:'clip_add',item},exclude);
       else if(state.hostConn?.open)state.hostConn.send({type:'clip_add',item});
@@ -614,29 +897,39 @@
   }
 
   function deleteItem(id,broadcastIt=true,exclude=null){
-    state.items=state.items.filter(x=>x.id!==id); renderItems();
+    state.items=state.items.filter(x=>x.id!==id);
+    renderItems();
     if(!broadcastIt)return;
     if(state.isHost)broadcast({type:'clip_delete',id},exclude);
     else if(state.hostConn?.open)state.hostConn.send({type:'clip_delete',id});
   }
 
   function clearAll(broadcastIt=true,exclude=null){
-    state.items=[]; renderItems();
+    state.items=[];
+    renderItems();
     if(!broadcastIt)return;
     if(state.isHost)broadcast({type:'clear_all'},exclude);
     else if(state.hostConn?.open)state.hostConn.send({type:'clear_all'});
   }
 
+  function sendRoomSnapshot(){
+    if(state.isHost)broadcast({type:'room_snapshot',items:state.items});
+  }
+
   function handleHostConnection(conn){
     const pendingCount=Array.from(state.peers.values()).filter(info=>!info.accepted).length;
+
     if(acceptedPeerCount()>=LIMITS.MAX_DEVICES-1||pendingCount>=LIMITS.MAX_PENDING_CONNECTIONS){
-      try{conn.on('open',()=>conn.send({type:'pair_reject',reason:'This live room is currently full.'}))}catch{}
-      setTimeout(()=>{try{conn.close()}catch{}},400);
+      conn.on('open',()=>{
+        try{conn.send({type:'pair_reject',reason:'This live room is currently full.'})}catch{}
+        setTimeout(()=>{try{conn.close()}catch{}},250);
+      });
       return;
     }
 
     const info={
       conn,
+      deviceId:'',
       name:'Pending device',
       platform:'Unknown platform',
       accepted:false,
@@ -644,12 +937,13 @@
       lastSeen:Date.now(),
       pendingTimer:null
     };
+
     state.peers.set(conn.peer,info);
 
     info.pendingTimer=setTimeout(()=>{
       const current=state.peers.get(conn.peer);
       if(current&&!current.accepted){
-        try{current.conn.send({type:'pair_reject',reason:'Pairing timed out. Scan a fresh QR.'})}catch{}
+        try{current.conn.send({type:'pair_reject',reason:'Connection timed out. Scan a fresh QR or reconnect.'})}catch{}
         try{current.conn.close()}catch{}
         state.peers.delete(conn.peer);
         renderDevices();
@@ -662,7 +956,6 @@
       current.lastSeen=Date.now();
 
       if(!allowRate(current.messageTimes)){
-        try{conn.send({type:'pair_reject',reason:'Too many messages. Connection closed.'})}catch{}
         try{conn.close()}catch{}
         state.peers.delete(conn.peer);
         renderDevices();
@@ -671,38 +964,107 @@
       if(!safeMessage(data))return;
 
       if(!current.accepted){
-        if(data.type!=='pair_request')return;
+        if(data.type==='pair_request'){
+          const validToken=
+            state.pairOpen &&
+            typeof data.token==='string' &&
+            /^[0-9a-f]{48}$/i.test(data.token) &&
+            data.token===state.pairToken &&
+            Date.now()<state.pairExpiresAt;
 
-        const valid=state.pairOpen &&
-          typeof data.token==='string' &&
-          /^[0-9a-f]{48}$/i.test(data.token) &&
-          data.token===state.pairToken &&
-          Date.now()<state.pairExpiresAt;
+          const deviceId=typeof data.deviceId==='string'&&/^dev_[0-9a-f]{24}$/i.test(data.deviceId)
+            ?data.deviceId:'';
 
-        if(!valid){
-          try{conn.send({type:'pair_reject',reason:'QR pairing token expired or invalid.'})}catch{}
-          setTimeout(()=>{try{conn.close()}catch{}},250);
+          if(!validToken||!deviceId){
+            try{conn.send({type:'pair_reject',reason:'QR pairing token expired or invalid.'})}catch{}
+            setTimeout(()=>{try{conn.close()}catch{}},250);
+            return;
+          }
+
+          const alreadyKnown=state.authorizedDevices.has(deviceId);
+          if(!alreadyKnown&&state.authorizedDevices.size>=LIMITS.MAX_DEVICES-1){
+            try{conn.send({type:'pair_reject',reason:'This live room has reached its trusted-device limit.'})}catch{}
+            setTimeout(()=>{try{conn.close()}catch{}},250);
+            return;
+          }
+
+          clearTimeout(current.pendingTimer);
+          current.pendingTimer=null;
+          current.accepted=true;
+          current.deviceId=deviceId;
+          current.name=cleanDeviceName(data.name)||'Linked device';
+          current.platform=cleanDeviceName(data.platform)||'Unknown platform';
+
+          // Rotate persistent authorization whenever the user explicitly scans a fresh QR.
+          const authSecret=randomHex(32);
+          state.authorizedDevices.set(deviceId,{
+            deviceId,
+            secret:authSecret,
+            name:current.name,
+            platform:current.platform
+          });
+
+          state.peers.set(conn.peer,current);
+          persistCurrentRole();
+
+          const roster=buildRoster();
+          try{
+            conn.send({
+              type:'pair_accept',
+              authSecret,
+              hostName:state.deviceName,
+              hostPlatform:state.platformName,
+              items:state.items.slice(0,LIMITS.MAX_ITEMS),
+              roster
+            });
+          }catch{}
+
+          regeneratePairToken();
+          el.pairState.textContent='Device linked. Token revoked; a fresh QR is now active.';
+          broadcastRoster();
+          toast(`${current.name} linked.`);
           return;
         }
 
-        if(acceptedPeerCount()>=LIMITS.MAX_DEVICES-1){
-          try{conn.send({type:'pair_reject',reason:'This live room has reached its device limit.'})}catch{}
-          setTimeout(()=>{try{conn.close()}catch{}},250);
+        if(data.type==='resume_request'){
+          const deviceId=typeof data.deviceId==='string'?data.deviceId:'';
+          const secret=typeof data.authSecret==='string'?data.authSecret:'';
+          const auth=state.authorizedDevices.get(deviceId);
+
+          if(!auth||!secret||secret!==auth.secret){
+            try{conn.send({type:'resume_reject',reason:'This device is no longer authorized for the room.'})}catch{}
+            setTimeout(()=>{try{conn.close()}catch{}},250);
+            return;
+          }
+
+          clearTimeout(current.pendingTimer);
+          current.pendingTimer=null;
+          current.accepted=true;
+          current.deviceId=deviceId;
+          current.name=cleanDeviceName(data.name)||auth.name||'Linked device';
+          current.platform=cleanDeviceName(data.platform)||auth.platform||'Unknown platform';
+
+          auth.name=current.name;
+          auth.platform=current.platform;
+          state.authorizedDevices.set(deviceId,auth);
+          state.peers.set(conn.peer,current);
+          persistCurrentRole();
+
+          try{
+            conn.send({
+              type:'resume_accept',
+              hostName:state.deviceName,
+              hostPlatform:state.platformName,
+              items:state.items.slice(0,LIMITS.MAX_ITEMS),
+              roster:buildRoster(),
+              needSnapshot:state.items.length===0
+            });
+          }catch{}
+
+          broadcastRoster();
           return;
         }
 
-        clearTimeout(current.pendingTimer);
-        current.pendingTimer=null;
-        current.accepted=true;
-        current.name=cleanDeviceName(data.name)||'Linked device';
-        current.platform=cleanDeviceName(data.platform)||'Unknown platform';
-        state.peers.set(conn.peer,current);
-        try{conn.send({type:'pair_accept',items:state.items.slice(0,LIMITS.MAX_ITEMS)})}catch{}
-
-        regeneratePairToken();
-        el.pairState.textContent='Device linked. Token revoked; a fresh QR is now active.';
-        renderDevices();
-        toast(`${current.name} linked.`);
         return;
       }
 
@@ -715,6 +1077,39 @@
       }else if(data.type==='clear_all'){
         clearAll(false);
         broadcast({type:'clear_all'},conn.peer);
+      }else if(data.type==='rename_device'){
+        const next=cleanDeviceName(data.name);
+        if(next&&current.deviceId){
+          current.name=next;
+          const auth=state.authorizedDevices.get(current.deviceId);
+          if(auth){
+            auth.name=next;
+            state.authorizedDevices.set(current.deviceId,auth);
+            persistCurrentRole();
+          }
+          broadcastRoster();
+        }
+      }else if(data.type==='sync_snapshot'){
+        if(state.items.length===0){
+          const incoming=sanitizeSnapshot(data.items);
+          if(incoming.length){
+            state.items=incoming;
+            renderItems();
+            sendRoomSnapshot();
+          }
+        }else{
+          try{conn.send({type:'room_snapshot',items:state.items})}catch{}
+        }
+      }else if(data.type==='leave_room'){
+        const leavingId=current.deviceId;
+        if(leavingId&&state.authorizedDevices.has(leavingId)){
+          state.authorizedDevices.delete(leavingId);
+          persistCurrentRole();
+        }
+        try{conn.send({type:'leave_ack'})}catch{}
+        try{conn.close()}catch{}
+        state.peers.delete(conn.peer);
+        broadcastRoster();
       }else if(data.type==='pong'&&Number.isFinite(Number(data.ts))){
         current.lastSeen=Date.now();
       }
@@ -724,8 +1119,9 @@
       const current=state.peers.get(conn.peer);
       if(current?.pendingTimer)clearTimeout(current.pendingTimer);
       state.peers.delete(conn.peer);
-      renderDevices();
+      broadcastRoster();
     };
+
     conn.on('close',cleanup);
     conn.on('error',cleanup);
   }
@@ -734,36 +1130,81 @@
     if(!safeMessage(data))return;
 
     if(data.type==='pair_accept'){
-      const incoming=Array.isArray(data.items)?data.items:[];
-      const safeItems=[];
-      let total=0;
-      for(const raw of incoming.slice(0,LIMITS.MAX_ITEMS)){
-        const item=sanitizeItem(raw);
-        if(!item)continue;
-        const size=byteLength(item.text);
-        if(total+size>LIMITS.MAX_TOTAL_BYTES)break;
-        if(safeItems.some(x=>x.id===item.id))continue;
-        safeItems.push(item);
-        total+=size;
-      }
+      const incoming=sanitizeSnapshot(data.items);
       state.accepted=true;
-      state.items=safeItems;
+      state.items=incoming;
+      state.authSecret=typeof data.authSecret==='string'?data.authSecret:'';
+      state.resumeHostPeerId=state.hostConn?.peer||state.resumeHostPeerId;
+      state.isHost=false;
+      state.roster=Array.isArray(data.roster)?data.roster:[];
+      persistCurrentRole();
+
       history.replaceState(null,'',cleanBaseUrl());
       el.joinScreen.classList.remove('show');
       el.mainApp.style.display='';
       el.pairBtn.style.display='none';
       el.joinRoomBtn.style.display='none';
+      el.sendBtn.disabled=false;
+      el.textInput.disabled=false;
+      el.clearAllBtn.disabled=false;
       setStatus('ok','Connected');
       renderDevices();
       renderItems();
       el.joinSuccessModal.classList.add('show');
       toast('Device linked.');
+      return;
+    }
+
+    if(data.type==='resume_accept'){
+      const hostItems=sanitizeSnapshot(data.items);
+      state.accepted=true;
+      state.isHost=false;
+      state.roster=Array.isArray(data.roster)?data.roster:state.roster;
+
+      if(hostItems.length){
+        state.items=hostItems;
+        renderItems();
+      }else if(data.needSnapshot&&state.items.length&&state.hostConn?.open){
+        try{state.hostConn.send({type:'sync_snapshot',items:state.items})}catch{}
+      }
+
+      el.mainApp.style.display='';
+      el.joinScreen.classList.remove('show');
+      el.pairBtn.style.display='none';
+      el.joinRoomBtn.style.display='none';
+      el.sendBtn.disabled=false;
+      el.textInput.disabled=false;
+      el.clearAllBtn.disabled=false;
+      setStatus('ok','Connected');
+      renderDevices();
+      return;
+    }
+
+    if(data.type==='room_roster'){
+      if(Array.isArray(data.roster)){
+        state.roster=data.roster.slice(0,LIMITS.MAX_DEVICES);
+        renderDevices();
+      }
+    }else if(data.type==='room_snapshot'){
+      state.items=sanitizeSnapshot(data.items);
+      renderItems();
     }else if(data.type==='pair_reject'){
       el.joinSpinner.style.display='none';
       el.joinMessage.textContent=typeof data.reason==='string'?data.reason.slice(0,160):'Pairing failed.';
       setStatus('bad','Pairing failed');
       el.joinRoomBtn.style.display='';
       el.joinRoomBtn.disabled=false;
+    }else if(data.type==='resume_reject'){
+      state.accepted=false;
+      prepareFreshHostPersistence();
+      el.pairBtn.style.display='';
+      el.joinRoomBtn.style.display='';
+      el.pairBtn.disabled=true;
+      el.joinRoomBtn.disabled=false;
+      setStatus('bad','Pairing revoked');
+      el.sendHint.textContent='This device was removed from the previous room. Refresh to create a new room or join another room.';
+      renderDevices();
+      toast('Pairing was revoked by the host.');
     }else if(data.type==='clip_add'){
       const item=sanitizeItem(data.item);
       if(item)addItem(item,false);
@@ -774,56 +1215,105 @@
     }else if(data.type==='ping'&&Number.isFinite(Number(data.ts))){
       try{if(state.hostConn?.open)state.hostConn.send({type:'pong',ts:Number(data.ts)})}catch{}
     }else if(data.type==='removed'||data.type==='session_end'){
-      clearAll(false);
       state.accepted=false;
+      clearAll(false);
+      prepareFreshHostPersistence();
       el.sendBtn.disabled=true;
       el.textInput.disabled=true;
+      el.joinRoomBtn.style.display='';
+      el.joinRoomBtn.disabled=false;
       setStatus('bad',data.type==='removed'?'Removed from room':'Session ended');
-      toast(data.type==='removed'?'This device was removed.':'Host ended session. Clipboard cleared.');
+      toast(data.type==='removed'?'The host removed this device. Pairing was deleted.':'The host ended the room. Pairing was deleted.');
     }
   }
 
-  function joinHost(host,token){
+  function scheduleGuestReconnect(){
+    if(state.ended||state.isHost||!state.resumeHostPeerId||!state.authSecret)return;
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer=setTimeout(()=>{
+      if(state.ended||state.isHost||state.accepted)return;
+      if(state.peer?.open){
+        joinHost(state.resumeHostPeerId,state.authSecret,'resume');
+      }else{
+        scheduleGuestReconnect();
+      }
+    },LIMITS.RECONNECT_MS);
+  }
+
+  function joinHost(host,credential,mode='pair'){
+    if(!state.peer?.open||!host)return;
+
+    try{
+      if(state.hostConn?.open)state.hostConn.close();
+    }catch{}
+
+    state.joinMode=mode;
     const conn=state.peer.connect(host,{reliable:true,serialization:'json'});
     state.hostConn=conn;
+    state.resumeHostPeerId=host;
+
     const timeout=setTimeout(()=>{
       if(!state.accepted){
-        el.joinSpinner.style.display='none';
-        el.joinMessage.textContent='Could not connect. Scan a fresh QR and try again.';
+        if(mode==='resume'){
+          setStatus('','Reconnecting…');
+          scheduleGuestReconnect();
+        }else{
+          el.joinSpinner.style.display='none';
+          el.joinMessage.textContent='Could not connect. Scan a fresh QR and try again.';
+        }
       }
     },12000);
 
     conn.on('open',()=>{
-      try{conn.send({type:'pair_request',token,name:state.deviceName,platform:state.platformName})}catch{}
+      try{
+        if(mode==='resume'){
+          conn.send({
+            type:'resume_request',
+            deviceId:state.deviceId,
+            authSecret:credential,
+            name:state.deviceName,
+            platform:state.platformName
+          });
+        }else{
+          conn.send({
+            type:'pair_request',
+            token:credential,
+            deviceId:state.deviceId,
+            name:state.deviceName,
+            platform:state.platformName
+          });
+        }
+      }catch{}
     });
+
     conn.on('data',data=>{
       if(!allowRate(state.hostMessageTimes)){
         try{conn.close()}catch{}
-        clearAll(false);
         state.accepted=false;
-        el.joinSpinner.style.display='none';
-        el.joinMessage.textContent='Connection closed because the message rate limit was exceeded.';
         setStatus('bad','Connection rate limited');
         return;
       }
-      if(data?.type==='pair_accept'||data?.type==='pair_reject')clearTimeout(timeout);
+      if(['pair_accept','pair_reject','resume_accept','resume_reject'].includes(data?.type))clearTimeout(timeout);
       handleGuestData(data);
     });
+
     conn.on('close',()=>{
-      if(state.accepted&&!state.ended){
+      clearTimeout(timeout);
+      if(!state.ended&&!state.isHost){
         state.accepted=false;
-        clearAll(false);                         // host disappears => guest RAM clipboard cleared
-        el.sendBtn.disabled=true; el.textInput.disabled=true;
-        el.joinRoomBtn.style.display='';
-        el.joinRoomBtn.disabled=false;
-        setStatus('bad','Host disconnected');
-        toast('Host disconnected. Temporary clipboard cleared.');
+        setStatus('','Reconnecting…');
+        el.sendHint.textContent='Pairing is preserved. Reconnecting automatically…';
+        renderDevices();
+        scheduleGuestReconnect();
       }
     });
+
     conn.on('error',()=>{
-      if(!state.accepted){
-        clearTimeout(timeout); el.joinSpinner.style.display='none';
-        el.joinMessage.textContent='Connection failed. Try a fresh QR.';
+      clearTimeout(timeout);
+      if(!state.ended&&!state.isHost){
+        state.accepted=false;
+        setStatus('','Reconnecting…');
+        scheduleGuestReconnect();
       }
     });
   }
@@ -854,31 +1344,31 @@
     el.retryScannerBtn.hidden=true;
   }
 
+  function endCurrentHostRoomForJoin(){
+    if(!state.isHost)return;
+    try{broadcast({type:'session_end'})}catch{}
+    for(const info of state.peers.values()){
+      try{info.conn.close()}catch{}
+      if(info.pendingTimer)clearTimeout(info.pendingTimer);
+    }
+    state.peers.clear();
+    state.authorizedDevices.clear();
+    clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer=null;
+  }
+
   function transitionToGuestRoom(pair){
     if(!pair||!state.peer||state.ended)return false;
 
-    // If this browser was acting as a host, end that local room before joining another one
-    // so clipboard state can never leak between separate rooms.
-    clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer=null;
     closePair();
-
-    if(state.isHost){
-      try{broadcast({type:'session_end'})}catch{}
-      for(const info of state.peers.values()){
-        try{info.conn.close()}catch{}
-        if(info.pendingTimer)clearTimeout(info.pendingTimer);
-      }
-      state.peers.clear();
-    }else{
-      try{state.hostConn?.close()}catch{}
-    }
-
+    endCurrentHostRoomForJoin();
     clearAll(false);
-    state.hostMessageTimes=[];
+
     state.isHost=false;
     state.accepted=false;
-    state.hostConn=null;
+    state.authSecret='';
+    state.resumeHostPeerId=pair.host;
+    state.roster=[];
 
     el.pairBtn.style.display='none';
     el.joinRoomBtn.style.display='none';
@@ -887,7 +1377,7 @@
     setStatus('','Joining room…');
     renderDevices();
 
-    joinHost(pair.host,pair.token);
+    joinHost(pair.host,pair.token,'pair');
     return true;
   }
 
@@ -897,12 +1387,12 @@
       el.qrScannerStatus.textContent='QR detected, but it is not a valid Temporary Clipboard pairing QR.';
       return false;
     }
+
     el.qrScannerStatus.textContent='Valid pairing QR detected. Joining room…';
     stopScanner();
     el.joinRoomModal.classList.remove('show');
 
-    const started=transitionToGuestRoom(parsed.pair);
-    if(!started){
+    if(!transitionToGuestRoom(parsed.pair)){
       el.joinRoomModal.classList.add('show');
       el.qrScannerStatus.textContent='Could not start the room connection. Please try again.';
       el.retryScannerBtn.hidden=false;
@@ -912,7 +1402,7 @@
   }
 
   async function scanWithBarcodeDetector(){
-    if(!('BarcodeDetector' in window))return false;
+    if(!('BarcodeDetector'in window))return false;
     let supported=[];
     try{supported=await BarcodeDetector.getSupportedFormats()}catch{return false}
     if(!supported.includes('qr_code'))return false;
@@ -923,7 +1413,7 @@
       try{
         if(el.qrScannerVideo.readyState>=2){
           const codes=await detector.detect(el.qrScannerVideo);
-          if(codes&&codes.length&&codes[0].rawValue){
+          if(codes?.length&&codes[0].rawValue){
             if(acceptScannedQr(codes[0].rawValue))return;
           }
         }
@@ -956,6 +1446,7 @@
       }catch{}
       state.scannerFrame=requestAnimationFrame(loop);
     };
+
     state.scannerFrame=requestAnimationFrame(loop);
     return true;
   }
@@ -978,6 +1469,7 @@
         video:{facingMode:{ideal:'environment'}},
         audio:false
       });
+
       state.scannerStream=stream;
       state.scannerActive=true;
       el.qrScannerVideo.srcObject=stream;
@@ -1018,12 +1510,22 @@
   }
 
   function renderQr(url){
-    el.qr.innerHTML=''; el.pairUrl.textContent=url;
+    el.qr.innerHTML='';
+    el.pairUrl.textContent=url;
+
     if(typeof QRCode==='undefined'){
       el.qr.innerHTML='<div style="color:#111;text-align:center;padding:18px">QR library unavailable.<br>Use the pairing URL shown here.</div>';
       return;
     }
-    new QRCode(el.qr,{text:url,width:196,height:196,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.M});
+
+    new QRCode(el.qr,{
+      text:url,
+      width:196,
+      height:196,
+      colorDark:'#000',
+      colorLight:'#fff',
+      correctLevel:QRCode.CorrectLevel.M
+    });
   }
 
   function regeneratePairToken(){
@@ -1046,7 +1548,8 @@
 
   function openPair(){
     if(!state.isHost||!state.myPeerId)return;
-    state.pairOpen=true; el.pairModal.classList.add('show');
+    state.pairOpen=true;
+    el.pairModal.classList.add('show');
     el.pairState.textContent='Waiting for scan…';
     regeneratePairToken();
     clearInterval(state.pairTimer);
@@ -1054,86 +1557,158 @@
   }
 
   function closePair(){
-    state.pairOpen=false; state.pairToken=null; state.pairExpiresAt=0;
-    clearInterval(state.pairTimer); state.pairTimer=null;
-    el.pairModal.classList.remove('show'); el.qr.innerHTML=''; el.pairUrl.textContent='';
+    state.pairOpen=false;
+    state.pairToken=null;
+    state.pairExpiresAt=0;
+    clearInterval(state.pairTimer);
+    state.pairTimer=null;
+    el.pairModal.classList.remove('show');
+    el.qr.innerHTML='';
+    el.pairUrl.textContent='';
+  }
+
+  function startHostHeartbeat(){
+    clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer=setInterval(()=>{
+      if(!state.isHost||state.ended)return;
+      const now=Date.now();
+
+      for(const [peerId,info] of state.peers){
+        if(!info.accepted)continue;
+        if(!info.conn.open||now-info.lastSeen>LIMITS.PEER_STALE_MS){
+          try{info.conn.close()}catch{}
+          state.peers.delete(peerId);
+          continue;
+        }
+        try{info.conn.send({type:'ping',ts:now})}catch{}
+      }
+      broadcastRoster();
+    },LIMITS.HEARTBEAT_MS);
   }
 
   function endSession(){
     if(state.ended)return;
-    state.ended=true; closePair();
+    state.ended=true;
+    closePair();
     closeJoinRoom();
+    clearTimeout(state.reconnectTimer);
     clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer=null;
+
     if(state.isHost){
-      broadcast({type:'session_end'});
-      for(const {conn} of state.peers.values()){try{conn.close()}catch{}}
+      try{broadcast({type:'session_end'})}catch{}
+      for(const info of state.peers.values()){
+        try{info.conn.close()}catch{}
+      }
       state.peers.clear();
-    }else{try{state.hostConn?.close()}catch{}}
+      state.authorizedDevices.clear();
+    }else{
+      if(state.hostConn?.open){
+        try{state.hostConn.send({type:'leave_room',deviceId:state.deviceId})}catch{}
+      }
+      try{state.hostConn?.close()}catch{}
+    }
+
     clearAll(false);
+    prepareFreshHostPersistence();
+
     try{state.peer?.destroy()}catch{}
-    state.peer=null; state.accepted=false;
-    el.sendBtn.disabled=true; el.textInput.disabled=true; el.pairBtn.disabled=true;
-    el.joinRoomBtn.disabled=true; el.clearAllBtn.disabled=true;
-    setStatus('bad','Session ended'); renderDevices();
-    toast('Session ended. Temporary text cleared.');
+    state.peer=null;
+    state.accepted=false;
+
+    el.sendBtn.disabled=true;
+    el.textInput.disabled=true;
+    el.pairBtn.disabled=true;
+    el.joinRoomBtn.disabled=true;
+    el.clearAllBtn.disabled=true;
+    setStatus('bad','Session ended');
+    renderDevices();
+    toast('Session ended. Pairing authorization was removed.');
   }
 
-  function startPeer(){
+  function initPeer(){
     if(typeof Peer==='undefined'){
       setStatus('bad','PeerJS failed to load');
       el.sendHint.textContent='PeerJS CDN could not be loaded. Internet access is required for signaling.';
       return;
     }
-    const pair=decodePair();
-    state.isHost=!pair;
 
-    if(pair){
-      el.mainApp.style.display='none'; el.joinScreen.classList.add('show');
+    const explicitPair=decodePair();
+    state.explicitPair=explicitPair;
+
+    if(explicitPair){
+      state.isHost=false;
+      el.mainApp.style.display='none';
+      el.joinScreen.classList.add('show');
     }
 
-    state.peer=new Peer(undefined,{debug:1});
+    const requestedId=!explicitPair&&state.isHost?state.hostPeerId:undefined;
+    state.peer=new Peer(requestedId,{debug:1});
 
     state.peer.on('open',id=>{
       state.myPeerId=id;
+
+      if(explicitPair){
+        setStatus('','Connecting…');
+        joinHost(explicitPair.host,explicitPair.token,'pair');
+        return;
+      }
+
       if(state.isHost){
+        state.hostPeerId=id;
+        persistCurrentRole();
         setStatus('ok','Live session ready');
+        el.pairBtn.style.display='';
         el.pairBtn.disabled=false;
+        el.joinRoomBtn.style.display='';
+        el.joinRoomBtn.disabled=false;
         renderDevices();
-        clearInterval(state.heartbeatTimer);
-        state.heartbeatTimer=setInterval(()=>{
-          const now=Date.now();
-          for(const [peerId,info] of state.peers){
-            if(!info.accepted)continue;
-            if(!info.conn.open||now-info.lastSeen>LIMITS.PEER_STALE_MS){
-              try{info.conn.close()}catch{}
-              state.peers.delete(peerId);
-              continue;
-            }
-            try{info.conn.send({type:'ping',ts:now})}catch{}
-          }
-          renderDevices();
-        },LIMITS.HEARTBEAT_MS);
+        startHostHeartbeat();
       }else{
-        setStatus('','Connecting…'); joinHost(pair.host,pair.token);
+        setStatus('','Reconnecting…');
+        el.pairBtn.style.display='none';
+        el.joinRoomBtn.style.display='none';
+        joinHost(state.resumeHostPeerId,state.authSecret,'resume');
       }
     });
 
     state.peer.on('connection',conn=>{
-      if(!state.isHost){try{conn.close()}catch{};return}
+      if(!state.isHost){
+        try{conn.close()}catch{}
+        return;
+      }
       handleHostConnection(conn);
     });
-    state.peer.on('disconnected',()=>{if(!state.ended)setStatus('','Reconnecting signaling…')});
+
+    state.peer.on('disconnected',()=>{
+      if(state.ended)return;
+      setStatus('','Reconnecting signaling…');
+      try{state.peer.reconnect()}catch{}
+    });
+
     state.peer.on('error',err=>{
       const type=err?.type||'network';
+
+      if(state.isHost&&type==='unavailable-id'&&!state.ended){
+        setStatus('','Restoring room identity…');
+        clearTimeout(state.peerRetryTimer);
+        state.peerRetryTimer=setTimeout(()=>{
+          try{state.peer?.destroy()}catch{}
+          initPeer();
+        },1400);
+        return;
+      }
+
       if(!state.accepted&&!state.isHost){
         el.joinSpinner.style.display='none';
-        el.joinMessage.textContent=`Could not join (${type}). Scan a fresh QR or try another network.`;
+        el.joinMessage.textContent=`Could not join (${type}). The app will keep trying if this device was already trusted.`;
+        if(state.authSecret)scheduleGuestReconnect();
       }
+
       if(!state.myPeerId)setStatus('bad',`Connection error: ${type}`);
     });
   }
 
+  loadPersistent();
   el.deviceNameInput.value=state.deviceName;
 
   function saveDeviceName(){
@@ -1143,10 +1718,24 @@
       toast('Device name cannot be empty.');
       return;
     }
+
+    if(next===state.deviceName){
+      toast('Device name is unchanged.');
+      return;
+    }
+
     state.deviceName=next;
     el.deviceNameInput.value=next;
+    persistCurrentRole();
     renderDevices();
-    toast('Device name updated for this session.');
+
+    if(state.isHost){
+      broadcastRoster();
+    }else if(state.accepted&&state.hostConn?.open){
+      try{state.hostConn.send({type:'rename_device',name:next})}catch{}
+    }
+
+    toast('Device name updated across the room.');
   }
 
   el.saveDeviceNameBtn.addEventListener('click',saveDeviceName);
@@ -1158,22 +1747,39 @@
   });
 
   el.composer.addEventListener('submit',e=>{
-    e.preventDefault(); if(state.ended)return;
+    e.preventDefault();
+    if(state.ended)return;
+
     const text=el.textInput.value.trim();
-    if(!text){toast('Enter some text first.');el.textInput.focus();return}
+    if(!text){
+      toast('Enter some text first.');
+      el.textInput.focus();
+      return;
+    }
+
     const added=addItem({id:uid(),text,ts:Date.now(),from:state.deviceName},true);
     if(!added){
       toast(`Clipboard limit reached (${LIMITS.MAX_ITEMS} items / about 2 MB).`);
       return;
     }
-    el.textInput.value=''; el.charCount.textContent='0';
+
+    el.textInput.value='';
+    el.charCount.textContent='0';
     toast('Added to live clipboard.');
   });
+
   el.textInput.addEventListener('input',()=>el.charCount.textContent=String(el.textInput.value.length));
   el.clearInputBtn.addEventListener('click',()=>{
-    el.textInput.value='';el.charCount.textContent='0';el.textInput.focus()
+    el.textInput.value='';
+    el.charCount.textContent='0';
+    el.textInput.focus();
   });
-  el.clearAllBtn.addEventListener('click',()=>{clearAll(true);toast('Clipboard cleared.')});
+
+  el.clearAllBtn.addEventListener('click',()=>{
+    clearAll(true);
+    toast('Clipboard cleared.');
+  });
+
   el.pairBtn.addEventListener('click',openPair);
   el.joinRoomBtn.addEventListener('click',openJoinRoom);
   el.closeJoinRoomBtn.addEventListener('click',closeJoinRoom);
@@ -1181,11 +1787,16 @@
   el.retryScannerBtn.addEventListener('click',startScanner);
   el.joinRoomModal.addEventListener('click',e=>{if(e.target===el.joinRoomModal)closeJoinRoom()});
   el.closePairBtn.addEventListener('click',closePair);
-  el.regenBtn.addEventListener('click',()=>{regeneratePairToken();el.pairState.textContent='Fresh QR generated.'});
+  el.regenBtn.addEventListener('click',()=>{
+    regeneratePairToken();
+    el.pairState.textContent='Fresh QR generated.';
+  });
+
   function openEndConfirm(){
     if(state.ended)return;
     el.endConfirmModal.classList.add('show');
   }
+
   function closeEndConfirm(){
     el.endConfirmModal.classList.remove('show');
   }
@@ -1210,25 +1821,22 @@
   el.pairModal.addEventListener('click',e=>{if(e.target===el.pairModal)closePair()});
 
   /*
-    Important RAM-only behavior:
-    - No localStorage / sessionStorage / IndexedDB / cookies.
-    - Refresh creates a brand-new JS state object.
-    - Closing the tab destroys this page's RAM.
-    - Best effort: if the host closes/refreshes, notify connected guests and clear their session too.
-      Browsers do not guarantee unload messages on crashes/power loss, so guests also clear when the
-      WebRTC connection closes.
+    Persistence model:
+    - Clipboard TEXT remains RAM-only and is never written to localStorage/IndexedDB/cookies.
+    - Pairing authorization, host room identity, and the device nickname are stored locally.
+    - Refresh/close can therefore restore the trusted-device relationship automatically.
+    - If at least one paired device stays online, in-memory clipboard items can be re-synced.
+    - End Session, host Remove, or guest leave revokes the persistent pairing authorization.
   */
   window.addEventListener('pagehide',()=>{
     stopScanner();
+    clearTimeout(state.reconnectTimer);
     clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer=null;
-    try{
-      if(state.isHost)broadcast({type:'session_end'});
-      else state.hostConn?.close();
-    }catch{}
-    state.items=[];
+    state.items=[]; // clipboard payload is explicitly discarded from this page instance
     state.pairToken=null;
     state.hostMessageTimes=[];
+    // Intentionally do NOT broadcast session_end here.
+    // A normal refresh/close must not revoke trusted-device pairing.
   });
 
   el.joinSuccessOkBtn.addEventListener('click',()=>{
@@ -1246,7 +1854,7 @@
 
   renderItems();
   renderDevices();
-  startPeer();
+  initPeer();
 })();
 </script>
 </body>
