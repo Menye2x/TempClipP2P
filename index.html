@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b1020">
+  <title>Temporary Clipboard — P2P</title>
+
+  <!-- Free public libraries. No account/API key is required by this demo. -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+
+  <style>
+    :root{
+      color-scheme:dark;
+      --bg:#0b1020;--panel:#111827;--panel2:#172033;--border:#2a3650;
+      --text:#eef2ff;--muted:#9ca9c5;--accent:#8aa2ff;--accent2:#6f89f4;
+      --ok:#4ade80;--warn:#fbbf24;--danger:#fb7185;
+      --shadow:0 18px 50px rgba(0,0,0,.3)
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);
+      font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    body{padding:24px}
+    button,input,textarea{font:inherit}
+    button{cursor:pointer}
+    button:disabled{cursor:not-allowed;opacity:.5}
+    .app{max-width:1080px;margin:auto}
+    .top{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:20px}
+    .title{font-size:clamp(1.45rem,4vw,2.15rem);font-weight:800;letter-spacing:-.03em;margin:0}
+    .sub{color:var(--muted);margin-top:7px;line-height:1.45}
+    .status{display:inline-flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--border);
+      border-radius:999px;background:rgba(255,255,255,.03);white-space:nowrap}
+    .dot{width:9px;height:9px;border-radius:50%;background:var(--warn)}
+    .dot.ok{background:var(--ok)} .dot.bad{background:var(--danger)}
+    .notice{display:none;margin:0 0 18px;padding:13px 15px;border:1px solid #66531d;
+      background:#2b2412;border-radius:12px;color:#ffe7a3;line-height:1.45}
+    .notice.show{display:block}
+    .grid{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow)}
+    .card-h{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;
+      justify-content:space-between;align-items:center;gap:12px}
+    .card-b{padding:18px}
+    h2{font-size:1rem;margin:0}.muted{color:var(--muted)}.small{font-size:.875rem}.tiny{font-size:.75rem}
+    .device-list{display:grid;gap:10px}
+    .device{display:flex;gap:10px;align-items:center;justify-content:space-between;
+      padding:12px;border:1px solid var(--border);background:var(--panel2);border-radius:12px}
+    .device-name{font-weight:700}.live{font-size:.78rem;color:var(--ok)}
+    .btns{display:flex;gap:9px;flex-wrap:wrap}
+    .btn{min-height:42px;border-radius:10px;border:1px solid var(--border);background:var(--panel2);
+      color:var(--text);padding:10px 14px;font-weight:700}
+    .btn:hover{filter:brightness(1.08)}
+    .btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1020}
+    .btn.primary:hover{background:var(--accent2);color:#fff}
+    .btn.danger{border-color:#5b2b39;color:#ffd0da}
+    .composer{display:grid;gap:10px}
+    textarea,input{width:100%;border:1px solid var(--border);background:#0e1628;color:var(--text);
+      border-radius:11px;padding:12px 13px;outline:none}
+    textarea{resize:vertical;min-height:126px;line-height:1.5}
+    textarea:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,156,255,.15)}
+    .row{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+    .clips{display:grid;gap:11px}
+    .empty{border:1px dashed var(--border);border-radius:13px;padding:28px;text-align:center;color:var(--muted)}
+    .clip{border:1px solid var(--border);background:var(--panel2);border-radius:13px;padding:14px}
+    .clip-meta{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-bottom:9px}
+    .clip-text{white-space:pre-wrap;word-break:break-word;margin:0;line-height:1.5;color:#f7f9ff}
+    .clip-actions{display:flex;gap:7px;flex-wrap:wrap}
+    .mini{border:1px solid var(--border);background:#10192b;color:var(--text);border-radius:9px;
+      padding:7px 10px;font-size:.8rem}
+    .mini:hover{filter:brightness(1.1)}
+    .section-gap{margin-top:16px}
+    .privacy{margin-top:16px;padding:12px;border:1px solid var(--border);
+      border-radius:12px;background:rgba(255,255,255,.02);line-height:1.45}
+    .modal-wrap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+      padding:18px;background:rgba(3,8,18,.78);z-index:50}
+    .modal-wrap.show{display:flex}
+    .modal{width:min(680px,100%);background:var(--panel);border:1px solid var(--border);
+      border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.5);overflow:hidden}
+    .modal-h{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;
+      justify-content:space-between;gap:12px;align-items:center}
+    .modal-b{padding:20px}
+    .qr-layout{display:grid;grid-template-columns:220px 1fr;gap:22px;align-items:center}
+    #qr{background:white;padding:12px;border-radius:14px;width:220px;height:220px;display:grid;place-items:center}
+    #qr img,#qr canvas{max-width:100%;height:auto}
+    .count{font-size:2.5rem;font-weight:850;letter-spacing:-.04em;margin:7px 0}
+    .pair-url{margin-top:10px;font-size:.78rem;color:var(--muted);word-break:break-all;max-height:70px;overflow:auto}
+    .toast{position:fixed;right:18px;bottom:18px;max-width:min(430px,calc(100vw - 36px));
+      background:#111827;border:1px solid var(--border);box-shadow:var(--shadow);border-radius:12px;
+      padding:12px 14px;transform:translateY(20px);opacity:0;pointer-events:none;transition:.2s ease;z-index:70}
+    .toast.show{transform:none;opacity:1}
+    .join-screen{display:none;max-width:620px;margin:70px auto;text-align:center}
+    .join-screen.show{display:block}
+    .spinner{width:40px;height:40px;border-radius:50%;border:4px solid var(--border);
+      border-top-color:var(--accent);margin:18px auto;animation:spin .9s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .foot{margin-top:18px;color:var(--muted);font-size:.78rem;line-height:1.55}
+    .app-footer{margin-top:28px;padding:18px 0 6px;border-top:1px solid var(--border);
+      text-align:center;color:var(--muted);font-size:.84rem;line-height:1.6}
+    .creator-link{display:inline;border:0;background:transparent;color:var(--text);padding:0;
+      font:inherit;font-weight:700;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+    .creator-link:hover{color:var(--accent)}
+    .creator-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    @media(max-width:820px){
+      body{padding:14px}.grid{grid-template-columns:1fr}.top{flex-direction:column}
+      .status{white-space:normal}.qr-layout{grid-template-columns:1fr;text-align:center}
+      #qr{margin:auto}.modal-b{text-align:center}
+    }
+  </style>
+</head>
+<body>
+  <main class="app" id="mainApp">
+    <div class="top">
+      <div>
+        <h1 class="title">Temporary Clipboard</h1>
+        <div class="sub">Live text sync between paired devices. Clipboard content exists only in browser RAM.</div>
+      </div>
+      <div class="status"><span id="statusDot" class="dot"></span><span id="statusText">Starting session…</span></div>
+    </div>
+
+    <div id="httpsNotice" class="notice">
+      <b>How this app works:</b> one device starts a live temporary session, then another device joins by scanning
+      a short-lived pairing QR. After pairing, both devices can send and receive text in either direction through
+      a WebRTC peer connection. Clipboard text exists only in browser RAM, so refreshing or closing the app clears
+      the temporary data. No clipboard text is intentionally stored in a database or cloud storage.
+    </div>
+
+    <div class="grid">
+      <aside class="card">
+        <div class="card-h">
+          <div>
+            <h2>Linked devices</h2>
+            <div class="small muted" id="deviceSummary">Preparing room…</div>
+          </div>
+          <button class="btn primary" id="pairBtn" type="button" disabled>+ Add</button>
+        </div>
+        <div class="card-b">
+          <div id="deviceList" class="device-list"></div>
+
+          <div class="privacy small">
+            <b>RAM-only clipboard</b><br>
+            No clipboard text is written by this app to <code>localStorage</code>, IndexedDB, cookies,
+            or a database. Refresh/close destroys the local clipboard state.
+          </div>
+
+          <div class="btns section-gap">
+            <button class="btn danger" id="endBtn" type="button">End Session</button>
+            <button class="btn" id="refreshBtn" type="button">Refresh Session</button>
+          </div>
+        </div>
+      </aside>
+
+      <section>
+        <div class="card">
+          <div class="card-h">
+            <div>
+              <h2>Send text</h2>
+              <div class="small muted" id="sendHint">Connect another device, or use this clipboard locally.</div>
+            </div>
+          </div>
+          <div class="card-b">
+            <form id="composer" class="composer">
+              <textarea id="textInput" maxlength="20000" placeholder="Type or paste text, URL, code snippet…"></textarea>
+              <div class="row">
+                <div class="small muted"><span id="charCount">0</span> / 20,000</div>
+                <div class="btns">
+                  <button class="btn" id="clearInputBtn" type="button">Clear input</button>
+                  <button class="btn primary" id="sendBtn" type="submit">Send to session</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class="card section-gap">
+          <div class="card-h">
+            <div>
+              <h2>Temporary clipboard</h2>
+              <div class="small muted" id="itemSummary">0 items</div>
+            </div>
+            <button class="btn" id="clearAllBtn" type="button">Clear All</button>
+          </div>
+          <div class="card-b">
+            <div id="emptyState" class="empty">No temporary text yet.</div>
+            <div id="clipList" class="clips"></div>
+          </div>
+        </div>
+
+        <div class="foot">
+          This build uses WebRTC DataChannel for clipboard traffic and the free public PeerJS signaling service
+          only to help browsers find each other. The app code does not deliberately upload clipboard text to a
+          database/cloud store. Public free infrastructure can change availability at any time.
+        </div>
+      </section>
+    </div>
+
+    <footer class="app-footer">
+      <div>
+        Created by
+        <a class="creator-link" href="https://github.com/Menye2x" target="_blank" rel="noopener noreferrer">Menye2x</a>
+      </div>
+      <div>©2026 Gaius Fridolf. All rights reserved.</div>
+    </footer>
+  </main>
+
+  <section id="joinScreen" class="join-screen">
+    <h1 class="title">Joining Temporary Clipboard</h1>
+    <div class="sub" id="joinMessage">Opening peer connection…</div>
+    <div class="spinner" id="joinSpinner"></div>
+    <button class="btn" id="joinCancelBtn" type="button">Cancel</button>
+  </section>
+
+  <div id="pairModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="pairTitle">
+    <div class="modal">
+      <div class="modal-h">
+        <div>
+          <h2 id="pairTitle">Pair another device</h2>
+          <div class="small muted">Scan this QR on the device you want to link.</div>
+        </div>
+        <button class="btn" id="closePairBtn" type="button">Close</button>
+      </div>
+      <div class="modal-b">
+        <div class="qr-layout">
+          <div id="qr" aria-label="Pairing QR code"></div>
+          <div>
+            <div class="tiny muted">QR expires and regenerates automatically</div>
+            <div class="count" id="countdown">00:30</div>
+            <div class="small muted" id="pairState">Waiting for scan…</div>
+            <div class="btns section-gap">
+              <button class="btn" id="regenBtn" type="button">Regenerate now</button>
+            </div>
+            <div class="pair-url" id="pairUrl"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="refreshSuccessModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="refreshSuccessTitle">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-h">
+        <div>
+          <h2 id="refreshSuccessTitle">Successfully Refreshed</h2>
+          <div class="small muted">The session has been refreshed successfully.</div>
+        </div>
+      </div>
+      <div class="modal-b">
+        <div class="small muted" style="line-height:1.55">
+          The previous RAM-only clipboard state has been cleared. This message is for acknowledgement only.
+        </div>
+        <div class="btns section-gap" style="justify-content:flex-end">
+          <button class="btn primary" id="refreshSuccessOkBtn" type="button">Acknowledge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="endConfirmModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="endConfirmTitle">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-h">
+        <div>
+          <h2 id="endConfirmTitle">End this session?</h2>
+          <div class="small muted">This will disconnect linked devices and clear all temporary clipboard text.</div>
+        </div>
+      </div>
+      <div class="modal-b">
+        <div class="small muted" style="line-height:1.55">
+          Because this app stores clipboard content only in browser RAM, ending the session cannot be undone.
+        </div>
+        <div class="btns section-gap" style="justify-content:flex-end">
+          <button class="btn" id="cancelEndBtn" type="button">Cancel</button>
+          <button class="btn danger" id="confirmEndBtn" type="button">End Session</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = id => document.getElementById(id);
+  const el = {
+    mainApp:$('mainApp'), joinScreen:$('joinScreen'), joinMessage:$('joinMessage'),
+    joinSpinner:$('joinSpinner'), joinCancelBtn:$('joinCancelBtn'), httpsNotice:$('httpsNotice'),
+    statusDot:$('statusDot'), statusText:$('statusText'), deviceSummary:$('deviceSummary'),
+    pairBtn:$('pairBtn'), deviceList:$('deviceList'), endBtn:$('endBtn'), refreshBtn:$('refreshBtn'), sendHint:$('sendHint'),
+    composer:$('composer'), textInput:$('textInput'), charCount:$('charCount'),
+    clearInputBtn:$('clearInputBtn'), sendBtn:$('sendBtn'), itemSummary:$('itemSummary'),
+    clearAllBtn:$('clearAllBtn'), emptyState:$('emptyState'), clipList:$('clipList'),
+    pairModal:$('pairModal'), closePairBtn:$('closePairBtn'), qr:$('qr'),
+    countdown:$('countdown'), pairState:$('pairState'), regenBtn:$('regenBtn'),
+    pairUrl:$('pairUrl'), refreshSuccessModal:$('refreshSuccessModal'),
+    refreshSuccessOkBtn:$('refreshSuccessOkBtn'), endConfirmModal:$('endConfirmModal'),
+    cancelEndBtn:$('cancelEndBtn'), confirmEndBtn:$('confirmEndBtn'), toast:$('toast')
+  };
+
+  const state = {
+    peer:null, myPeerId:null, isHost:false, hostConn:null, accepted:false,
+    peers:new Map(), items:[], pairToken:null, pairExpiresAt:0, pairTimer:null,
+    pairOpen:false, ended:false, deviceName:detectDeviceName()
+  };
+
+  if (location.protocol === 'file:') el.httpsNotice.classList.add('show');
+
+  function detectDeviceName(){
+    const ua=navigator.userAgent||'';
+    if(/iPad/i.test(ua))return'iPad';
+    if(/iPhone/i.test(ua))return'iPhone';
+    if(/Android/i.test(ua)&&/Mobile/i.test(ua))return'Android Phone';
+    if(/Android/i.test(ua))return'Android Tablet';
+    if(/Windows/i.test(ua))return'Windows Device';
+    if(/Macintosh/i.test(ua))return'Mac';
+    if(/Linux/i.test(ua))return'Linux Device';
+    return'Browser Device';
+  }
+
+  function randomHex(bytes=24){
+    const b=new Uint8Array(bytes); crypto.getRandomValues(b);
+    return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+  }
+  function uid(){return'clip_'+randomHex(12)}
+  function setStatus(kind,text){
+    el.statusDot.className='dot'+(kind==='ok'?' ok':kind==='bad'?' bad':'');
+    el.statusText.textContent=text;
+  }
+  let toastTimer;
+  function toast(msg){
+    clearTimeout(toastTimer); el.toast.textContent=msg; el.toast.classList.add('show');
+    toastTimer=setTimeout(()=>el.toast.classList.remove('show'),2200);
+  }
+  function fmt(ts){return new Date(ts).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+  function cleanBaseUrl(){return location.href.split('#')[0]}
+  function baseWithoutRefreshMarker(){
+    const url=new URL(cleanBaseUrl());
+    url.searchParams.delete('refreshed');
+    return url.toString();
+  }
+  function wasRefreshed(){
+    try{return new URL(location.href).searchParams.get('refreshed')==='1'}catch{return false}
+  }
+
+  function encodePair(host,token){
+    const s=JSON.stringify({host,token});
+    return btoa(unescape(encodeURIComponent(s)));
+  }
+  function decodePair(){
+    if(!location.hash.startsWith('#pair='))return null;
+    try{
+      const raw=location.hash.slice(6);
+      const obj=JSON.parse(decodeURIComponent(escape(atob(raw))));
+      if(!obj||typeof obj.host!=='string'||typeof obj.token!=='string')return null;
+      return obj;
+    }catch{return null}
+  }
+
+  async function copyText(text){
+    try{
+      if(navigator.clipboard&&window.isSecureContext){
+        await navigator.clipboard.writeText(text); return true;
+      }
+    }catch{}
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=text; ta.style.position='fixed'; ta.style.opacity='0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok=document.execCommand('copy'); ta.remove(); return ok;
+    }catch{return false}
+  }
+
+  function renderItems(){
+    el.itemSummary.textContent=`${state.items.length} item${state.items.length===1?'':'s'}`;
+    el.emptyState.style.display=state.items.length?'none':'block';
+    el.clipList.innerHTML='';
+    for(const item of state.items){
+      const card=document.createElement('article'); card.className='clip';
+      const meta=document.createElement('div'); meta.className='clip-meta';
+      const left=document.createElement('div'); left.className='small muted';
+      left.textContent=`${item.from||'Device'} · ${fmt(item.ts||Date.now())}`;
+      const actions=document.createElement('div'); actions.className='clip-actions';
+      const cp=document.createElement('button'); cp.type='button'; cp.className='mini'; cp.textContent='Copy';
+      cp.addEventListener('click',async()=>toast(await copyText(item.text)?'Copied.':'Copy manually.'));
+      const del=document.createElement('button'); del.type='button'; del.className='mini'; del.textContent='Delete';
+      del.addEventListener('click',()=>deleteItem(item.id,true));
+      const p=document.createElement('p'); p.className='clip-text'; p.textContent=item.text;
+      actions.append(cp,del); meta.append(left,actions); card.append(meta,p); el.clipList.append(card);
+    }
+  }
+
+  function renderDevices(){
+    el.deviceList.innerHTML='';
+    const me=document.createElement('div'); me.className='device';
+    const mine=document.createElement('div');
+    const mineName=document.createElement('div'); mineName.className='device-name'; mineName.textContent=state.deviceName;
+    const mineSub=document.createElement('div'); mineSub.className='tiny muted'; mineSub.textContent='This device';
+    mine.append(mineName,mineSub);
+    const live=document.createElement('div'); live.className='live'; live.textContent='● Live';
+    me.append(mine,live); el.deviceList.append(me);
+
+    if(state.isHost){
+      let count=1;
+      for(const [peerId,info] of state.peers){
+        if(!info.accepted)continue;
+        count++;
+        const row=document.createElement('div'); row.className='device';
+        const wrap=document.createElement('div');
+        const n=document.createElement('div'); n.className='device-name'; n.textContent=info.name||'Linked device';
+        const s=document.createElement('div'); s.className='tiny muted'; s.textContent='Paired in this session';
+        wrap.append(n,s);
+        const rm=document.createElement('button'); rm.type='button'; rm.className='mini'; rm.textContent='Remove';
+        rm.addEventListener('click',()=>{
+          try{info.conn.send({type:'removed'})}catch{}
+          try{info.conn.close()}catch{}
+          state.peers.delete(peerId); renderDevices(); toast('Device removed.');
+        });
+        row.append(wrap,rm); el.deviceList.append(row);
+      }
+      el.deviceSummary.textContent=`${count} device${count===1?'':'s'} in this live room`;
+      el.sendHint.textContent=count>1?'Text will sync live to linked devices.':'Pair another device, or use this clipboard locally.';
+    }else{
+      if(state.accepted){
+        const row=document.createElement('div'); row.className='device';
+        row.innerHTML='<div><div class="device-name">Session Host</div><div class="tiny muted">Connected peer</div></div><div class="live">● Live</div>';
+        el.deviceList.append(row);
+        el.deviceSummary.textContent='Connected to live room';
+        el.sendHint.textContent='Text will sync live through the room host.';
+      }else{
+        el.deviceSummary.textContent='Joining room…';
+      }
+    }
+  }
+
+  function broadcast(data,exclude=null){
+    for(const [peerId,info] of state.peers){
+      if(!info.accepted||peerId===exclude||!info.conn.open)continue;
+      try{info.conn.send(data)}catch{}
+    }
+  }
+
+  function addItem(item,broadcastIt=true,exclude=null){
+    if(!item||typeof item.text!=='string'||item.text.length>20000)return;
+    if(state.items.some(x=>x.id===item.id))return;
+    state.items.unshift(item); renderItems();
+    if(!broadcastIt)return;
+    if(state.isHost)broadcast({type:'clip_add',item},exclude);
+    else if(state.hostConn?.open)state.hostConn.send({type:'clip_add',item});
+  }
+
+  function deleteItem(id,broadcastIt=true,exclude=null){
+    state.items=state.items.filter(x=>x.id!==id); renderItems();
+    if(!broadcastIt)return;
+    if(state.isHost)broadcast({type:'clip_delete',id},exclude);
+    else if(state.hostConn?.open)state.hostConn.send({type:'clip_delete',id});
+  }
+
+  function clearAll(broadcastIt=true,exclude=null){
+    state.items=[]; renderItems();
+    if(!broadcastIt)return;
+    if(state.isHost)broadcast({type:'clear_all'},exclude);
+    else if(state.hostConn?.open)state.hostConn.send({type:'clear_all'});
+  }
+
+  function handleHostConnection(conn){
+    state.peers.set(conn.peer,{conn,name:'Pending device',accepted:false});
+    conn.on('data',data=>{
+      if(!data||typeof data!=='object')return;
+      const info=state.peers.get(conn.peer); if(!info)return;
+
+      if(!info.accepted){
+        if(data.type!=='pair_request')return;
+        const valid=state.pairOpen &&
+          typeof data.token==='string' &&
+          data.token===state.pairToken &&
+          Date.now()<state.pairExpiresAt;
+
+        if(!valid){
+          try{conn.send({type:'pair_reject',reason:'QR pairing token expired or invalid.'})}catch{}
+          setTimeout(()=>{try{conn.close()}catch{}},250); return;
+        }
+
+        info.accepted=true;
+        info.name=String(data.name||'Linked device').slice(0,80);
+        state.peers.set(conn.peer,info);
+        try{conn.send({type:'pair_accept',items:state.items})}catch{}
+
+        // Successful pairing immediately revokes the token.
+        regeneratePairToken();
+        el.pairState.textContent='Device linked. Token revoked; a fresh QR is now active.';
+        renderDevices(); toast(`${info.name} linked.`);
+        return;
+      }
+
+      if(data.type==='clip_add'&&data.item){
+        addItem(data.item,false); broadcast({type:'clip_add',item:data.item},conn.peer);
+      }else if(data.type==='clip_delete'&&typeof data.id==='string'){
+        deleteItem(data.id,false); broadcast({type:'clip_delete',id:data.id},conn.peer);
+      }else if(data.type==='clear_all'){
+        clearAll(false); broadcast({type:'clear_all'},conn.peer);
+      }
+    });
+    conn.on('close',()=>{state.peers.delete(conn.peer);renderDevices()});
+    conn.on('error',()=>{state.peers.delete(conn.peer);renderDevices()});
+  }
+
+  function handleGuestData(data){
+    if(!data||typeof data!=='object')return;
+    if(data.type==='pair_accept'){
+      state.accepted=true;
+      state.items=Array.isArray(data.items)?data.items.slice(0,300):[];
+      history.replaceState(null,'',cleanBaseUrl());
+      el.joinScreen.classList.remove('show'); el.mainApp.style.display='';
+      el.pairBtn.style.display='none'; setStatus('ok','Connected');
+      renderDevices(); renderItems(); toast('Device linked.');
+    }else if(data.type==='pair_reject'){
+      el.joinSpinner.style.display='none'; el.joinMessage.textContent=data.reason||'Pairing failed.';
+      setStatus('bad','Pairing failed');
+    }else if(data.type==='clip_add'&&data.item)addItem(data.item,false);
+    else if(data.type==='clip_delete'&&typeof data.id==='string')deleteItem(data.id,false);
+    else if(data.type==='clear_all')clearAll(false);
+    else if(data.type==='removed'||data.type==='session_end'){
+      clearAll(false); state.accepted=false; el.sendBtn.disabled=true; el.textInput.disabled=true;
+      setStatus('bad',data.type==='removed'?'Removed from room':'Session ended');
+      toast(data.type==='removed'?'This device was removed.':'Host ended session. Clipboard cleared.');
+    }
+  }
+
+  function joinHost(host,token){
+    const conn=state.peer.connect(host,{reliable:true,serialization:'json'});
+    state.hostConn=conn;
+    const timeout=setTimeout(()=>{
+      if(!state.accepted){
+        el.joinSpinner.style.display='none';
+        el.joinMessage.textContent='Could not connect. Scan a fresh QR and try again.';
+      }
+    },12000);
+
+    conn.on('open',()=>{
+      try{conn.send({type:'pair_request',token,name:state.deviceName})}catch{}
+    });
+    conn.on('data',data=>{
+      if(data?.type==='pair_accept'||data?.type==='pair_reject')clearTimeout(timeout);
+      handleGuestData(data);
+    });
+    conn.on('close',()=>{
+      if(state.accepted&&!state.ended){
+        state.accepted=false;
+        clearAll(false);                         // host disappears => guest RAM clipboard cleared
+        el.sendBtn.disabled=true; el.textInput.disabled=true;
+        setStatus('bad','Host disconnected');
+        toast('Host disconnected. Temporary clipboard cleared.');
+      }
+    });
+    conn.on('error',()=>{
+      if(!state.accepted){
+        clearTimeout(timeout); el.joinSpinner.style.display='none';
+        el.joinMessage.textContent='Connection failed. Try a fresh QR.';
+      }
+    });
+  }
+
+  function renderQr(url){
+    el.qr.innerHTML=''; el.pairUrl.textContent=url;
+    if(typeof QRCode==='undefined'){
+      el.qr.innerHTML='<div style="color:#111;text-align:center;padding:18px">QR library unavailable.<br>Use the pairing URL shown here.</div>';
+      return;
+    }
+    new QRCode(el.qr,{text:url,width:196,height:196,colorDark:'#000',colorLight:'#fff',correctLevel:QRCode.CorrectLevel.M});
+  }
+
+  function regeneratePairToken(){
+    if(!state.isHost||!state.myPeerId)return;
+    state.pairToken=randomHex(24);
+    state.pairExpiresAt=Date.now()+30000;
+    const payload=encodePair(state.myPeerId,state.pairToken);
+    renderQr(`${cleanBaseUrl()}#pair=${payload}`);
+    updateCountdown();
+  }
+
+  function updateCountdown(){
+    const sec=Math.ceil(Math.max(0,state.pairExpiresAt-Date.now())/1000);
+    el.countdown.textContent=`00:${String(sec).padStart(2,'0')}`;
+    if(sec<=0&&state.pairOpen){
+      regeneratePairToken();
+      el.pairState.textContent='QR expired and regenerated automatically.';
+    }
+  }
+
+  function openPair(){
+    if(!state.isHost||!state.myPeerId)return;
+    state.pairOpen=true; el.pairModal.classList.add('show');
+    el.pairState.textContent='Waiting for scan…';
+    regeneratePairToken();
+    clearInterval(state.pairTimer);
+    state.pairTimer=setInterval(updateCountdown,250);
+  }
+
+  function closePair(){
+    state.pairOpen=false; state.pairToken=null; state.pairExpiresAt=0;
+    clearInterval(state.pairTimer); state.pairTimer=null;
+    el.pairModal.classList.remove('show'); el.qr.innerHTML=''; el.pairUrl.textContent='';
+  }
+
+  function endSession(){
+    if(state.ended)return;
+    state.ended=true; closePair();
+    if(state.isHost){
+      broadcast({type:'session_end'});
+      for(const {conn} of state.peers.values()){try{conn.close()}catch{}}
+      state.peers.clear();
+    }else{try{state.hostConn?.close()}catch{}}
+    clearAll(false);
+    try{state.peer?.destroy()}catch{}
+    state.peer=null; state.accepted=false;
+    el.sendBtn.disabled=true; el.textInput.disabled=true; el.pairBtn.disabled=true; el.clearAllBtn.disabled=true;
+    setStatus('bad','Session ended'); renderDevices();
+    toast('Session ended. Temporary text cleared.');
+  }
+
+  function startPeer(){
+    if(typeof Peer==='undefined'){
+      setStatus('bad','PeerJS failed to load');
+      el.sendHint.textContent='PeerJS CDN could not be loaded. Internet access is required for signaling.';
+      return;
+    }
+    const pair=decodePair();
+    state.isHost=!pair;
+
+    if(pair){
+      el.mainApp.style.display='none'; el.joinScreen.classList.add('show');
+    }
+
+    state.peer=new Peer(undefined,{debug:1});
+
+    state.peer.on('open',id=>{
+      state.myPeerId=id;
+      if(state.isHost){
+        setStatus('ok','Live session ready');
+        el.pairBtn.disabled=false; renderDevices();
+      }else{
+        setStatus('','Connecting…'); joinHost(pair.host,pair.token);
+      }
+    });
+
+    state.peer.on('connection',conn=>{
+      if(!state.isHost){try{conn.close()}catch{};return}
+      handleHostConnection(conn);
+    });
+    state.peer.on('disconnected',()=>{if(!state.ended)setStatus('','Reconnecting signaling…')});
+    state.peer.on('error',err=>{
+      const type=err?.type||'network';
+      if(!state.accepted&&!state.isHost){
+        el.joinSpinner.style.display='none';
+        el.joinMessage.textContent=`Could not join (${type}). Scan a fresh QR or try another network.`;
+      }
+      if(!state.myPeerId)setStatus('bad',`Connection error: ${type}`);
+    });
+  }
+
+  el.composer.addEventListener('submit',e=>{
+    e.preventDefault(); if(state.ended)return;
+    const text=el.textInput.value.trim();
+    if(!text){toast('Enter some text first.');el.textInput.focus();return}
+    addItem({id:uid(),text,ts:Date.now(),from:state.deviceName},true);
+    el.textInput.value=''; el.charCount.textContent='0';
+    toast('Added to live clipboard.');
+  });
+  el.textInput.addEventListener('input',()=>el.charCount.textContent=String(el.textInput.value.length));
+  el.clearInputBtn.addEventListener('click',()=>{
+    el.textInput.value='';el.charCount.textContent='0';el.textInput.focus()
+  });
+  el.clearAllBtn.addEventListener('click',()=>{clearAll(true);toast('Clipboard cleared.')});
+  el.pairBtn.addEventListener('click',openPair);
+  el.closePairBtn.addEventListener('click',closePair);
+  el.regenBtn.addEventListener('click',()=>{regeneratePairToken();el.pairState.textContent='Fresh QR generated.'});
+  function openEndConfirm(){
+    if(state.ended)return;
+    el.endConfirmModal.classList.add('show');
+  }
+  function closeEndConfirm(){
+    el.endConfirmModal.classList.remove('show');
+  }
+
+  el.endBtn.addEventListener('click',openEndConfirm);
+  el.cancelEndBtn.addEventListener('click',closeEndConfirm);
+  el.confirmEndBtn.addEventListener('click',()=>{
+    closeEndConfirm();
+    endSession();
+  });
+  el.endConfirmModal.addEventListener('click',e=>{
+    if(e.target===el.endConfirmModal)closeEndConfirm();
+  });
+
+  el.refreshBtn.addEventListener('click',()=>{
+    const url=new URL(baseWithoutRefreshMarker());
+    url.searchParams.set('refreshed','1');
+    location.href=url.toString();
+  });
+
+  el.joinCancelBtn.addEventListener('click',()=>{location.href=cleanBaseUrl()});
+  el.pairModal.addEventListener('click',e=>{if(e.target===el.pairModal)closePair()});
+
+  /*
+    Important RAM-only behavior:
+    - No localStorage / sessionStorage / IndexedDB / cookies.
+    - Refresh creates a brand-new JS state object.
+    - Closing the tab destroys this page's RAM.
+    - Best effort: if the host closes/refreshes, notify connected guests and clear their session too.
+      Browsers do not guarantee unload messages on crashes/power loss, so guests also clear when the
+      WebRTC connection closes.
+  */
+  window.addEventListener('pagehide',()=>{
+    try{
+      if(state.isHost)broadcast({type:'session_end'});
+      else state.hostConn?.close();
+    }catch{}
+    state.items=[];               // explicit wipe before page leaves
+    state.pairToken=null;
+  });
+
+  el.refreshSuccessOkBtn.addEventListener('click',()=>{
+    el.refreshSuccessModal.classList.remove('show');
+  });
+
+  if(wasRefreshed()){
+    el.refreshSuccessModal.classList.add('show');
+    try{history.replaceState(null,'',baseWithoutRefreshMarker())}catch{}
+  }
+
+  renderItems();
+  renderDevices();
+  startPeer();
+})();
+</script>
+</body>
+</html>
