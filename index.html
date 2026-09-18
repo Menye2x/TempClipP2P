@@ -277,6 +277,25 @@
     </div>
   </div>
 
+  <div id="joinSuccessModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="joinSuccessTitle">
+    <div class="modal" style="max-width:520px">
+      <div class="modal-h">
+        <div>
+          <h2 id="joinSuccessTitle">Join Room Success!</h2>
+          <div class="small muted">This device is now connected to the live temporary clipboard room.</div>
+        </div>
+      </div>
+      <div class="modal-b">
+        <div class="small muted" style="line-height:1.55">
+          You can immediately send and receive text in both directions. No page refresh is required.
+        </div>
+        <div class="btns section-gap" style="justify-content:flex-end">
+          <button class="btn primary" id="joinSuccessOkBtn" type="button">Acknowledge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="refreshSuccessModal" class="modal-wrap" role="dialog" aria-modal="true" aria-labelledby="refreshSuccessTitle">
     <div class="modal" style="max-width:520px">
       <div class="modal-h">
@@ -338,7 +357,8 @@
     retryScannerBtn:$('retryScannerBtn'),
     pairModal:$('pairModal'), closePairBtn:$('closePairBtn'), qr:$('qr'),
     countdown:$('countdown'), pairState:$('pairState'), regenBtn:$('regenBtn'),
-    pairUrl:$('pairUrl'), refreshSuccessModal:$('refreshSuccessModal'),
+    pairUrl:$('pairUrl'), joinSuccessModal:$('joinSuccessModal'),
+    joinSuccessOkBtn:$('joinSuccessOkBtn'), refreshSuccessModal:$('refreshSuccessModal'),
     refreshSuccessOkBtn:$('refreshSuccessOkBtn'), endConfirmModal:$('endConfirmModal'),
     cancelEndBtn:$('cancelEndBtn'), confirmEndBtn:$('confirmEndBtn'), toast:$('toast')
   };
@@ -711,11 +731,14 @@
       setStatus('ok','Connected');
       renderDevices();
       renderItems();
+      el.joinSuccessModal.classList.add('show');
       toast('Device linked.');
     }else if(data.type==='pair_reject'){
       el.joinSpinner.style.display='none';
       el.joinMessage.textContent=typeof data.reason==='string'?data.reason.slice(0,160):'Pairing failed.';
       setStatus('bad','Pairing failed');
+      el.joinRoomBtn.style.display='';
+      el.joinRoomBtn.disabled=false;
     }else if(data.type==='clip_add'){
       const item=sanitizeItem(data.item);
       if(item)addItem(item,false);
@@ -766,6 +789,8 @@
         state.accepted=false;
         clearAll(false);                         // host disappears => guest RAM clipboard cleared
         el.sendBtn.disabled=true; el.textInput.disabled=true;
+        el.joinRoomBtn.style.display='';
+        el.joinRoomBtn.disabled=false;
         setStatus('bad','Host disconnected');
         toast('Host disconnected. Temporary clipboard cleared.');
       }
@@ -804,6 +829,43 @@
     el.retryScannerBtn.hidden=true;
   }
 
+  function transitionToGuestRoom(pair){
+    if(!pair||!state.peer||state.ended)return false;
+
+    // If this browser was acting as a host, end that local room before joining another one
+    // so clipboard state can never leak between separate rooms.
+    clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer=null;
+    closePair();
+
+    if(state.isHost){
+      try{broadcast({type:'session_end'})}catch{}
+      for(const info of state.peers.values()){
+        try{info.conn.close()}catch{}
+        if(info.pendingTimer)clearTimeout(info.pendingTimer);
+      }
+      state.peers.clear();
+    }else{
+      try{state.hostConn?.close()}catch{}
+    }
+
+    clearAll(false);
+    state.hostMessageTimes=[];
+    state.isHost=false;
+    state.accepted=false;
+    state.hostConn=null;
+
+    el.pairBtn.style.display='none';
+    el.joinRoomBtn.style.display='none';
+    el.deviceSummary.textContent='Joining room…';
+    el.sendHint.textContent='Connecting to the scanned live room…';
+    setStatus('','Joining room…');
+    renderDevices();
+
+    joinHost(pair.host,pair.token);
+    return true;
+  }
+
   function acceptScannedQr(value){
     const parsed=parsePairingUrl(value);
     if(!parsed){
@@ -812,7 +874,15 @@
     }
     el.qrScannerStatus.textContent='Valid pairing QR detected. Joining room…';
     stopScanner();
-    setTimeout(()=>{location.href=parsed.url},180);
+    el.joinRoomModal.classList.remove('show');
+
+    const started=transitionToGuestRoom(parsed.pair);
+    if(!started){
+      el.joinRoomModal.classList.add('show');
+      el.qrScannerStatus.textContent='Could not start the room connection. Please try again.';
+      el.retryScannerBtn.hidden=false;
+      return false;
+    }
     return true;
   }
 
@@ -1111,6 +1181,10 @@
     state.items=[];
     state.pairToken=null;
     state.hostMessageTimes=[];
+  });
+
+  el.joinSuccessOkBtn.addEventListener('click',()=>{
+    el.joinSuccessModal.classList.remove('show');
   });
 
   el.refreshSuccessOkBtn.addEventListener('click',()=>{
