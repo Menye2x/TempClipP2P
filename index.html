@@ -65,6 +65,9 @@
     .btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1020}
     .btn.primary:hover{background:var(--accent2);color:#fff}
     .btn.danger{border-color:#5b2b39;color:#ffd0da}
+    .retry-signaling-btn{border-color:#725d20;color:#ffe7a3;background:#2b2412}
+    .retry-signaling-btn:hover{background:#3a3017}
+    .retry-signaling-btn:disabled{opacity:.55}
     .composer{display:grid;gap:10px}
     textarea,input{width:100%;border:1px solid var(--border);background:#0e1628;color:var(--text);
       border-radius:11px;padding:12px 13px;outline:none}
@@ -155,6 +158,7 @@
           <div class="btns">
             <button class="btn primary" id="pairBtn" type="button" disabled>+ Add</button>
             <button class="btn" id="joinRoomBtn" type="button">Join Room</button>
+            <button class="btn retry-signaling-btn" id="retrySignalingBtn" type="button" hidden>Retry Signaling</button>
           </div>
         </div>
         <div class="card-b">
@@ -219,9 +223,10 @@
         </div>
 
         <div class="foot">
-          This build uses WebRTC DataChannel for clipboard traffic and the free public PeerJS signaling service
-          only to help browsers find each other. The app code does not deliberately upload clipboard text to a
-          database/cloud store. Public free infrastructure can change availability at any time.
+          Clipboard traffic uses WebRTC DataChannel. PeerJS public signaling is used only to help browsers
+          discover each other. This build intentionally performs no automatic signaling reconnect loop:
+          a failed connection stops and can be retried manually at any time. Clipboard text is not deliberately
+          uploaded to a database/cloud store.
         </div>
       </section>
     </div>
@@ -366,7 +371,8 @@
     mainApp:$('mainApp'), joinScreen:$('joinScreen'), joinMessage:$('joinMessage'),
     joinSpinner:$('joinSpinner'), joinCancelBtn:$('joinCancelBtn'), httpsNotice:$('httpsNotice'),
     statusDot:$('statusDot'), statusText:$('statusText'), deviceSummary:$('deviceSummary'),
-    pairBtn:$('pairBtn'), joinRoomBtn:$('joinRoomBtn'), deviceList:$('deviceList'),
+    pairBtn:$('pairBtn'), joinRoomBtn:$('joinRoomBtn'), retrySignalingBtn:$('retrySignalingBtn'),
+    deviceList:$('deviceList'),
     deviceNameInput:$('deviceNameInput'), saveDeviceNameBtn:$('saveDeviceNameBtn'),
     endBtn:$('endBtn'), refreshBtn:$('refreshBtn'), sendHint:$('sendHint'),
     composer:$('composer'), textInput:$('textInput'), charCount:$('charCount'),
@@ -406,8 +412,6 @@
     heartbeatTimer:null, hostMessageTimes:[],
     signalingConnected:false,
     peerGeneration:0,
-    pendingOpenPair:false,
-    freshRestartInProgress:false,
     scannerStream:null, scannerFrame:null, scannerActive:false
   };
 
@@ -1216,7 +1220,11 @@
 
     if(hasOpenDataChannel()){
       const count=state.isHost ? acceptedPeerCount()+1 : Math.max(2,state.roomRoster.length||2);
-      setStatus('ok',`Connected · ${count} device${count===1?'':'s'}`);
+      if(state.signalingConnected){
+        setStatus('ok',`Connected · ${count} device${count===1?'':'s'}`);
+      }else{
+        setStatus('ok',`Connected · ${count} device${count===1?'':'s'} · signaling offline`);
+      }
     }else if(state.isHost&&signalingReady()){
       setStatus('ok','Live session ready');
     }else if(state.accepted){
@@ -1225,7 +1233,6 @@
   }
 
   function clearOldAppResidue(){
-    // Remove only known Temporary Clipboard residues from older experimental builds.
     try{
       const exactKeys=[
         'tempclip.pairing.v3',
@@ -1252,34 +1259,6 @@
         }
       }
     }catch{}
-
-    try{
-      if('caches' in window){
-        caches.keys().then(keys=>{
-          for(const key of keys){
-            if(/tempclip|temporary-clipboard/i.test(key)){
-              caches.delete(key).catch(()=>{});
-            }
-          }
-        }).catch(()=>{});
-      }
-    }catch{}
-
-    try{
-      if('serviceWorker' in navigator){
-        navigator.serviceWorker.getRegistrations().then(regs=>{
-          const appPath=location.pathname.replace(/index\.html$/,'');
-          for(const reg of regs){
-            try{
-              const scopePath=new URL(reg.scope).pathname;
-              if(scopePath.startsWith(appPath)){
-                reg.unregister().catch(()=>{});
-              }
-            }catch{}
-          }
-        }).catch(()=>{});
-      }
-    }catch{}
   }
 
   function isReloadNavigation(){
@@ -1291,7 +1270,6 @@
   function prepareFreshBoot(){
     clearOldAppResidue();
 
-    // If the browser is refreshing a previous join URL, do not reuse its old pairing hash.
     if(isReloadNavigation()){
       try{
         const url=new URL(location.href);
@@ -1301,7 +1279,34 @@
     }
   }
 
-  function destroyCurrentPeer(){
+  function showRetryButton(){
+    el.retrySignalingBtn.hidden=false;
+    el.retrySignalingBtn.disabled=false;
+    el.retrySignalingBtn.textContent='Retry Signaling';
+  }
+
+  function hideRetryButton(){
+    el.retrySignalingBtn.hidden=true;
+    el.retrySignalingBtn.disabled=false;
+    el.retrySignalingBtn.textContent='Retry Signaling';
+  }
+
+  function showSignalingUnavailable(reason='Signaling unavailable'){
+    state.signalingConnected=false;
+    el.pairBtn.disabled=true;
+
+    if(hasOpenDataChannel()){
+      normalizeReadyStatus();
+      hideRetryButton();
+      toast('Existing WebRTC DataChannel remains active, but adding another device is unavailable.');
+      return;
+    }
+
+    setStatus('bad',reason);
+    showRetryButton();
+  }
+
+  function destroyFailedPeer(){
     state.peerGeneration+=1;
     state.signalingConnected=false;
     state.myPeerId=null;
@@ -1319,39 +1324,36 @@
     state.peer=null;
   }
 
-  function restartPeerFresh({openPairAfter=false}={}){
-    if(state.ended||state.freshRestartInProgress)return;
+  function manualRetrySignaling(){
+    if(state.ended)return;
 
-    if(state.isHost&&hasOpenDataChannel()){
-      try{broadcast({type:'session_end'})}catch{}
+    if(hasOpenDataChannel()){
+      normalizeReadyStatus();
+      toast('A live DataChannel is active. Signaling retry is disabled to avoid breaking the room.');
+      return;
     }
 
-    clearAll(false);
+    hideRetryButton();
+    destroyFailedPeer();
+
+    state.isHost=true;
     state.roomRoster=[];
     state.accepted=false;
-    state.freshRestartInProgress=true;
-    state.pendingOpenPair=openPairAfter;
 
-    destroyCurrentPeer();
-    setStatus('','Starting fresh session…');
-
-    setTimeout(()=>{
-      state.freshRestartInProgress=false;
-      state.isHost=true;
-      startPeer({forceHost:true});
-    },120);
+    setStatus('','Connecting to PeerJS signaling…');
+    startPeer({forceHost:true,manualRetry:true});
   }
+
 
   function openPair(){
     if(!state.isHost)return;
 
-    if(!state.myPeerId||!signalingReady()){
-      restartPeerFresh({openPairAfter:true});
-      toast('Starting a fresh session before opening the pairing QR…');
+    if(!signalingReady()){
+      showSignalingUnavailable('Signaling unavailable · use Retry Signaling');
+      toast('Pairing QR cannot open until PeerJS signaling is ready.');
       return;
     }
 
-    state.pendingOpenPair=false;
     state.pairOpen=true;
     el.pairModal.classList.add('show');
     el.pairState.textContent='Waiting for scan…';
@@ -1388,11 +1390,10 @@
     toast('Session ended. Temporary text cleared.');
   }
 
-  function startPeer({forceHost=false}={}){
+  function startPeer({forceHost=false,manualRetry=false}={}){
     if(typeof Peer==='undefined'){
-      setStatus('bad','PeerJS failed to load');
-      el.sendHint.textContent='PeerJS CDN could not be loaded. Internet access is required for signaling.';
-      el.pairBtn.disabled=false;
+      showSignalingUnavailable('PeerJS library failed to load');
+      el.sendHint.textContent='PeerJS CDN could not be loaded.';
       return;
     }
 
@@ -1408,11 +1409,23 @@
     }
 
     const generation=++state.peerGeneration;
-    const peer=new Peer(undefined,{debug:1});
+
+    // Public PeerJS only. One Peer object per attempt.
+    const peer=new Peer(undefined,{
+      host:'0.peerjs.com',
+      port:443,
+      path:'/',
+      secure:true,
+      debug:1
+    });
 
     state.peer=peer;
     state.signalingConnected=false;
     state.myPeerId=null;
+
+    if(!manualRetry){
+      setStatus('','Connecting to PeerJS signaling…');
+    }
 
     const initialTimeout=setTimeout(()=>{
       if(
@@ -1422,14 +1435,8 @@
         state.signalingConnected
       )return;
 
-      if(state.isHost){
-        setStatus('bad','Signaling unavailable · Click + Add for a fresh session');
-        el.pairBtn.disabled=false;
-      }else{
-        el.joinSpinner.style.display='none';
-        el.joinMessage.textContent='Signaling did not become ready. Scan a fresh QR and try again.';
-      }
-    },8000);
+      showSignalingUnavailable('PeerJS signaling timeout');
+    },10000);
 
     peer.on('open',id=>{
       if(generation!==state.peerGeneration||state.peer!==peer)return;
@@ -1437,7 +1444,7 @@
       clearTimeout(initialTimeout);
       state.signalingConnected=true;
       state.myPeerId=id;
-      state.freshRestartInProgress=false;
+      hideRetryButton();
 
       if(state.isHost){
         setStatus('ok','Live session ready');
@@ -1462,13 +1469,8 @@
 
           broadcastRoomRoster();
         },LIMITS.HEARTBEAT_MS);
-
-        if(state.pendingOpenPair){
-          state.pendingOpenPair=false;
-          openPair();
-        }
       }else{
-        setStatus('','Connecting…');
+        setStatus('','Connecting room…');
         joinHost(pair.host,pair.token);
       }
     });
@@ -1493,15 +1495,8 @@
 
       state.signalingConnected=false;
 
-      // No automatic reconnect loop.
-      // Existing RTC DataChannels are allowed to continue independently.
-      if(hasOpenDataChannel()){
-        normalizeReadyStatus();
-        toast('Signaling disconnected. Existing WebRTC DataChannel is still active.');
-      }else{
-        setStatus('bad','Signaling disconnected · Click + Add for a fresh session');
-        el.pairBtn.disabled=false;
-      }
+      // No automatic signaling reconnect is performed here.
+      showSignalingUnavailable('PeerJS signaling disconnected');
     });
 
     peer.on('error',err=>{
@@ -1515,16 +1510,10 @@
 
       if(!state.accepted&&!state.isHost){
         el.joinSpinner.style.display='none';
-        el.joinMessage.textContent=`Could not join (${type}). Scan a fresh QR or try another network.`;
+        el.joinMessage.textContent=`Could not join (${type}). Scan a fresh QR and try again.`;
       }
 
-      if(hasOpenDataChannel()){
-        normalizeReadyStatus();
-      }else{
-        state.signalingConnected=false;
-        setStatus('bad',`Signaling error: ${type} · Click + Add for a fresh session`);
-        el.pairBtn.disabled=false;
-      }
+      showSignalingUnavailable(`PeerJS signaling error: ${type}`);
     });
   }
 
@@ -1578,6 +1567,7 @@
   });
   el.clearAllBtn.addEventListener('click',()=>{clearAll(true);toast('Clipboard cleared.')});
   el.pairBtn.addEventListener('click',openPair);
+  el.retrySignalingBtn.addEventListener('click',manualRetrySignaling);
   el.joinRoomBtn.addEventListener('click',openJoinRoom);
   el.closeJoinRoomBtn.addEventListener('click',closeJoinRoom);
   el.startScannerBtn.addEventListener('click',startScanner);
