@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#0b1020">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>Temporary Clipboard — P2P</title>
 
   <!-- Free public libraries. No account/API key is required by this demo. -->
@@ -161,7 +164,7 @@
             <button class="btn rename-btn" id="saveDeviceNameBtn" type="button">Rename</button>
           </div>
           <div class="tiny muted" style="margin:-4px 0 12px">
-            Device name is RAM-only. While paired, rename changes are pushed live to every connected device.
+            Device name and pairing are session-only. Refresh starts a completely new session; live rename still syncs while connected.
           </div>
 
           <div id="deviceList" class="device-list"></div>
@@ -401,6 +404,10 @@
     deviceName:'',
     roomRoster:[],
     heartbeatTimer:null, hostMessageTimes:[],
+    signalingConnected:false,
+    peerGeneration:0,
+    pendingOpenPair:false,
+    freshRestartInProgress:false,
     scannerStream:null, scannerFrame:null, scannerActive:false
   };
 
@@ -1184,9 +1191,169 @@
     }
   }
 
+
+  function signalingReady(){
+    return !!(
+      state.peer &&
+      !state.peer.destroyed &&
+      state.signalingConnected === true &&
+      state.myPeerId
+    );
+  }
+
+  function hasOpenDataChannel(){
+    if(state.isHost){
+      for(const info of state.peers.values()){
+        if(info.accepted&&info.conn?.open)return true;
+      }
+      return false;
+    }
+    return !!(state.accepted&&state.hostConn?.open);
+  }
+
+  function normalizeReadyStatus(){
+    if(state.ended)return;
+
+    if(hasOpenDataChannel()){
+      const count=state.isHost ? acceptedPeerCount()+1 : Math.max(2,state.roomRoster.length||2);
+      setStatus('ok',`Connected · ${count} device${count===1?'':'s'}`);
+    }else if(state.isHost&&signalingReady()){
+      setStatus('ok','Live session ready');
+    }else if(state.accepted){
+      setStatus('ok','Connected · WebRTC DataChannel');
+    }
+  }
+
+  function clearOldAppResidue(){
+    // Remove only known Temporary Clipboard residues from older experimental builds.
+    try{
+      const exactKeys=[
+        'tempclip.pairing.v3',
+        'tempclip.pairing.v2',
+        'tempclip.pairing.v1',
+        'tempclip.pairing',
+        'temporary-clipboard-pairing'
+      ];
+      for(const key of exactKeys)localStorage.removeItem(key);
+
+      for(let i=localStorage.length-1;i>=0;i--){
+        const key=localStorage.key(i);
+        if(key&&/^(tempclip|temporary-clipboard)[.:_-]/i.test(key)){
+          localStorage.removeItem(key);
+        }
+      }
+    }catch{}
+
+    try{
+      for(let i=sessionStorage.length-1;i>=0;i--){
+        const key=sessionStorage.key(i);
+        if(key&&/^(tempclip|temporary-clipboard)[.:_-]/i.test(key)){
+          sessionStorage.removeItem(key);
+        }
+      }
+    }catch{}
+
+    try{
+      if('caches' in window){
+        caches.keys().then(keys=>{
+          for(const key of keys){
+            if(/tempclip|temporary-clipboard/i.test(key)){
+              caches.delete(key).catch(()=>{});
+            }
+          }
+        }).catch(()=>{});
+      }
+    }catch{}
+
+    try{
+      if('serviceWorker' in navigator){
+        navigator.serviceWorker.getRegistrations().then(regs=>{
+          const appPath=location.pathname.replace(/index\.html$/,'');
+          for(const reg of regs){
+            try{
+              const scopePath=new URL(reg.scope).pathname;
+              if(scopePath.startsWith(appPath)){
+                reg.unregister().catch(()=>{});
+              }
+            }catch{}
+          }
+        }).catch(()=>{});
+      }
+    }catch{}
+  }
+
+  function isReloadNavigation(){
+    try{
+      return performance.getEntriesByType('navigation')[0]?.type==='reload';
+    }catch{return false}
+  }
+
+  function prepareFreshBoot(){
+    clearOldAppResidue();
+
+    // If the browser is refreshing a previous join URL, do not reuse its old pairing hash.
+    if(isReloadNavigation()){
+      try{
+        const url=new URL(location.href);
+        url.hash='';
+        history.replaceState(null,'',url.toString());
+      }catch{}
+    }
+  }
+
+  function destroyCurrentPeer(){
+    state.peerGeneration+=1;
+    state.signalingConnected=false;
+    state.myPeerId=null;
+
+    try{state.hostConn?.close()}catch{}
+    state.hostConn=null;
+
+    for(const info of state.peers.values()){
+      try{info.conn?.close()}catch{}
+      if(info.pendingTimer)clearTimeout(info.pendingTimer);
+    }
+    state.peers.clear();
+
+    try{state.peer?.destroy()}catch{}
+    state.peer=null;
+  }
+
+  function restartPeerFresh({openPairAfter=false}={}){
+    if(state.ended||state.freshRestartInProgress)return;
+
+    if(state.isHost&&hasOpenDataChannel()){
+      try{broadcast({type:'session_end'})}catch{}
+    }
+
+    clearAll(false);
+    state.roomRoster=[];
+    state.accepted=false;
+    state.freshRestartInProgress=true;
+    state.pendingOpenPair=openPairAfter;
+
+    destroyCurrentPeer();
+    setStatus('','Starting fresh session…');
+
+    setTimeout(()=>{
+      state.freshRestartInProgress=false;
+      state.isHost=true;
+      startPeer({forceHost:true});
+    },120);
+  }
+
   function openPair(){
-    if(!state.isHost||!state.myPeerId)return;
-    state.pairOpen=true; el.pairModal.classList.add('show');
+    if(!state.isHost)return;
+
+    if(!state.myPeerId||!signalingReady()){
+      restartPeerFresh({openPairAfter:true});
+      toast('Starting a fresh session before opening the pairing QR…');
+      return;
+    }
+
+    state.pendingOpenPair=false;
+    state.pairOpen=true;
+    el.pairModal.classList.add('show');
     el.pairState.textContent='Waiting for scan…';
     regeneratePairToken();
     clearInterval(state.pairTimer);
@@ -1211,66 +1378,153 @@
       state.peers.clear();
     }else{try{state.hostConn?.close()}catch{}}
     clearAll(false);
+    state.peerGeneration+=1;
+    state.signalingConnected=false;
     try{state.peer?.destroy()}catch{}
-    state.peer=null; state.accepted=false;
+    state.peer=null; state.myPeerId=null; state.accepted=false;
     el.sendBtn.disabled=true; el.textInput.disabled=true; el.pairBtn.disabled=true;
     el.joinRoomBtn.disabled=true; el.clearAllBtn.disabled=true;
     setStatus('bad','Session ended'); renderDevices();
     toast('Session ended. Temporary text cleared.');
   }
 
-  function startPeer(){
+  function startPeer({forceHost=false}={}){
     if(typeof Peer==='undefined'){
       setStatus('bad','PeerJS failed to load');
       el.sendHint.textContent='PeerJS CDN could not be loaded. Internet access is required for signaling.';
+      el.pairBtn.disabled=false;
       return;
     }
-    const pair=decodePair();
-    state.isHost=!pair;
+
+    const pair=forceHost?null:decodePair();
+    state.isHost=forceHost||!pair;
 
     if(pair){
-      el.mainApp.style.display='none'; el.joinScreen.classList.add('show');
+      el.mainApp.style.display='none';
+      el.joinScreen.classList.add('show');
+    }else{
+      el.mainApp.style.display='';
+      el.joinScreen.classList.remove('show');
     }
 
-    state.peer=new Peer(undefined,{debug:1});
+    const generation=++state.peerGeneration;
+    const peer=new Peer(undefined,{debug:1});
 
-    state.peer.on('open',id=>{
-      state.myPeerId=id;
+    state.peer=peer;
+    state.signalingConnected=false;
+    state.myPeerId=null;
+
+    const initialTimeout=setTimeout(()=>{
+      if(
+        state.ended ||
+        generation!==state.peerGeneration ||
+        state.peer!==peer ||
+        state.signalingConnected
+      )return;
+
       if(state.isHost){
-        setStatus('ok','Live session ready · WebRTC');
+        setStatus('bad','Signaling unavailable · Click + Add for a fresh session');
+        el.pairBtn.disabled=false;
+      }else{
+        el.joinSpinner.style.display='none';
+        el.joinMessage.textContent='Signaling did not become ready. Scan a fresh QR and try again.';
+      }
+    },8000);
+
+    peer.on('open',id=>{
+      if(generation!==state.peerGeneration||state.peer!==peer)return;
+
+      clearTimeout(initialTimeout);
+      state.signalingConnected=true;
+      state.myPeerId=id;
+      state.freshRestartInProgress=false;
+
+      if(state.isHost){
+        setStatus('ok','Live session ready');
         el.pairBtn.disabled=false;
         renderDevices();
+
         clearInterval(state.heartbeatTimer);
         state.heartbeatTimer=setInterval(()=>{
           const now=Date.now();
+
           for(const [peerId,info] of state.peers){
             if(!info.accepted)continue;
+
             if(!info.conn.open||now-info.lastSeen>LIMITS.PEER_STALE_MS){
               try{info.conn.close()}catch{}
               state.peers.delete(peerId);
               continue;
             }
+
             try{info.conn.send({type:'ping',ts:now})}catch{}
           }
-          renderDevices();
+
+          broadcastRoomRoster();
         },LIMITS.HEARTBEAT_MS);
+
+        if(state.pendingOpenPair){
+          state.pendingOpenPair=false;
+          openPair();
+        }
       }else{
-        setStatus('','Connecting…'); joinHost(pair.host,pair.token);
+        setStatus('','Connecting…');
+        joinHost(pair.host,pair.token);
       }
     });
 
-    state.peer.on('connection',conn=>{
-      if(!state.isHost){try{conn.close()}catch{};return}
+    peer.on('connection',conn=>{
+      if(generation!==state.peerGeneration||state.peer!==peer)return;
+
+      if(!state.isHost){
+        try{conn.close()}catch{}
+        return;
+      }
+
       handleHostConnection(conn);
     });
-    state.peer.on('disconnected',()=>{if(!state.ended)setStatus('','Reconnecting signaling…')});
-    state.peer.on('error',err=>{
+
+    peer.on('disconnected',()=>{
+      if(
+        state.ended ||
+        generation!==state.peerGeneration ||
+        state.peer!==peer
+      )return;
+
+      state.signalingConnected=false;
+
+      // No automatic reconnect loop.
+      // Existing RTC DataChannels are allowed to continue independently.
+      if(hasOpenDataChannel()){
+        normalizeReadyStatus();
+        toast('Signaling disconnected. Existing WebRTC DataChannel is still active.');
+      }else{
+        setStatus('bad','Signaling disconnected · Click + Add for a fresh session');
+        el.pairBtn.disabled=false;
+      }
+    });
+
+    peer.on('error',err=>{
+      if(
+        state.ended ||
+        generation!==state.peerGeneration ||
+        state.peer!==peer
+      )return;
+
       const type=err?.type||'network';
+
       if(!state.accepted&&!state.isHost){
         el.joinSpinner.style.display='none';
         el.joinMessage.textContent=`Could not join (${type}). Scan a fresh QR or try another network.`;
       }
-      if(!state.myPeerId)setStatus('bad',`Connection error: ${type}`);
+
+      if(hasOpenDataChannel()){
+        normalizeReadyStatus();
+      }else{
+        state.signalingConnected=false;
+        setStatus('bad',`Signaling error: ${type} · Click + Add for a fresh session`);
+        el.pairBtn.disabled=false;
+      }
     });
   }
 
@@ -1350,9 +1604,11 @@
   });
 
   el.refreshBtn.addEventListener('click',()=>{
+    clearOldAppResidue();
     const url=new URL(baseWithoutRefreshMarker());
+    url.hash='';
     url.searchParams.set('refreshed','1');
-    location.href=url.toString();
+    location.replace(url.toString());
   });
 
   el.joinCancelBtn.addEventListener('click',()=>{location.href=cleanBaseUrl()});
@@ -1369,6 +1625,8 @@
   */
   window.addEventListener('pagehide',()=>{
     stopScanner();
+    state.peerGeneration+=1;
+    state.signalingConnected=false;
     clearInterval(state.heartbeatTimer);
     state.heartbeatTimer=null;
     try{
@@ -1393,6 +1651,16 @@
     try{history.replaceState(null,'',baseWithoutRefreshMarker())}catch{}
   }
 
+  window.addEventListener('pageshow',event=>{
+    if(event.persisted){
+      const url=new URL(location.href);
+      url.hash='';
+      url.searchParams.delete('refreshed');
+      location.replace(url.toString());
+    }
+  });
+
+  prepareFreshBoot();
   renderItems();
   renderDevices();
   startPeer();
